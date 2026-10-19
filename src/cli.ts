@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { createFireworks } from "@ai-sdk/fireworks";
-import { defineCommand, runCommand } from "citty";
+import { defineCommand, runCommand, showUsage, type CommandDef } from "citty";
 import { MAX_STEPS, RUN_TIMEOUT_MS, runNotesAgent } from "./agent.ts";
 import { requireApiKey, writeApiKey } from "./config.ts";
 import { RunError, UsageError } from "./errors.ts";
@@ -76,6 +76,9 @@ export const runCommandDefinition = defineCommand({
   },
   args: runArgs,
   async run({ args }) {
+    if (args._.length > 0) {
+      throw new UsageError(`Unexpected argument: ${String(args._[0])}`);
+    }
     await runDefault({
       prompt: args.prompt,
       allowPath: args["allow-path"],
@@ -98,6 +101,9 @@ export const setApiKeyCommand = defineCommand({
     },
   },
   async run({ args }) {
+    if (args._.length > 1) {
+      throw new UsageError(`Unexpected argument: ${String(args._[1])}`);
+    }
     const path = await writeApiKey(args.key);
     process.stdout.write(`API key saved to ${path}\n`);
   },
@@ -125,6 +131,13 @@ interface DefaultRunArgs {
 }
 
 async function runDefault(args: DefaultRunArgs): Promise<void> {
+  if (args.model.trim() === "") {
+    throw new UsageError("--model requires a value.");
+  }
+  if (args.deny !== undefined && args.deny.trim() === "") {
+    throw new UsageError("--deny requires a non-empty value.");
+  }
+
   const cwd = process.cwd();
   const promptPath = resolve(cwd, args.prompt);
   const prompt = await readPrompt(promptPath);
@@ -193,7 +206,18 @@ function formatSummary(summary: {
  * entry point applies the code to process.exitCode.
  */
 export async function main(rawArgs: string[]): Promise<number> {
-  if (rawArgs.includes("--help") || rawArgs.includes("-h")) {
+  if (rawArgs[0] === "set-api-key" && hasHelpFlag(rawArgs)) {
+    await showUsage(setApiKeyCommand as CommandDef, mainCommand as CommandDef);
+    return 0;
+  }
+  if (rawArgs[0] === "run" && hasHelpFlag(rawArgs)) {
+    await showUsage(
+      runCommandDefinition as CommandDef,
+      mainCommand as CommandDef,
+    );
+    return 0;
+  }
+  if (hasHelpFlag(rawArgs)) {
     process.stdout.write(HELP);
     return 0;
   }
@@ -203,12 +227,40 @@ export async function main(rawArgs: string[]): Promise<number> {
   }
 
   try {
+    assertFlagValues(rawArgs);
     await runCommand(mainCommand, { rawArgs });
     return 0;
   } catch (error) {
     const { code, message } = classifyError(error);
     process.stderr.write(`bobik: ${message}\n`);
+    if (error instanceof RunError && error.summary) {
+      process.stderr.write(`${formatSummary(error.summary)}\n`);
+    }
     return code;
+  }
+}
+
+function hasHelpFlag(rawArgs: string[]): boolean {
+  return rawArgs.includes("--help") || rawArgs.includes("-h");
+}
+
+const FLAGS_WITH_VALUES: ReadonlySet<string> = new Set([
+  "--prompt",
+  "--allow-path",
+  "--deny",
+  "--model",
+]);
+
+function assertFlagValues(rawArgs: string[]): void {
+  for (let index = 0; index < rawArgs.length; index += 1) {
+    const flag = rawArgs[index];
+    if (!flag || !FLAGS_WITH_VALUES.has(flag)) {
+      continue;
+    }
+    const value = rawArgs[index + 1];
+    if (value === undefined || (value.startsWith("-") && value !== "-")) {
+      throw new UsageError(`${flag} requires a value.`);
+    }
   }
 }
 

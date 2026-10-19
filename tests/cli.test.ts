@@ -15,6 +15,9 @@ import { afterEach, describe, it } from "node:test";
 import { parseDenyList } from "../src/cli.ts";
 
 const cliPath = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
+const launcherPath = fileURLToPath(
+  new URL("../bin/bobik.mjs", import.meta.url),
+);
 
 interface ProcessResult {
   code: number;
@@ -26,10 +29,18 @@ function runCli(
   args: string[],
   options: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
 ): Promise<ProcessResult> {
+  return runNode(cliPath, args, options);
+}
+
+function runNode(
+  entry: string,
+  args: string[],
+  options: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
+): Promise<ProcessResult> {
   return new Promise((resolvePromise) => {
     execFile(
       process.execPath,
-      [cliPath, ...args],
+      [entry, ...args],
       {
         cwd: options.cwd,
         env: options.env ?? process.env,
@@ -79,6 +90,56 @@ describe("cli", () => {
 
     assert.equal(result.code, 0);
     assert.match(result.stdout, /^\d+\.\d+\.\d+/);
+  });
+
+  it("runs through the published launcher without warnings", async () => {
+    const result = await runNode(launcherPath, ["--version"]);
+
+    assert.equal(result.code, 0);
+    assert.match(result.stdout, /^\d+\.\d+\.\d+/);
+    assert.equal(result.stderr, "");
+  });
+
+  it("shows subcommand help", async () => {
+    const result = await runCli(["set-api-key", "--help"]);
+
+    assert.equal(result.code, 0);
+    assert.match(result.stdout, /set-api-key/);
+    assert.match(result.stdout, /KEY/);
+  });
+
+  it("exits 2 when a flag is missing its value", async () => {
+    const model = await runCli([
+      "--prompt",
+      "prompt.md",
+      "--allow-path",
+      "./notes/**/*.md",
+      "--model",
+    ]);
+    assert.equal(model.code, 2);
+    assert.match(model.stderr, /--model requires a value/);
+
+    const deny = await runCli([
+      "--prompt",
+      "prompt.md",
+      "--allow-path",
+      "./notes/**/*.md",
+      "--deny",
+    ]);
+    assert.equal(deny.code, 2);
+    assert.match(deny.stderr, /--deny requires a value/);
+  });
+
+  it("rejects extra set-api-key arguments", async () => {
+    root = await mkdtemp(join(tmpdir(), "bobik-cli-"));
+
+    const result = await runCli(["set-api-key", "fw-secret", "extra"], {
+      env: { ...process.env, XDG_CONFIG_HOME: root },
+    });
+
+    assert.equal(result.code, 2);
+    assert.match(result.stderr, /Unexpected argument: extra/);
+    await assert.rejects(readFile(join(root, "bobik", "config.json")));
   });
 
   it("exits 2 when required flags are missing", async () => {
