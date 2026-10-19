@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   mkdtemp,
   mkdir,
+  readdir,
   readFile,
   rm,
   stat,
@@ -194,5 +195,58 @@ describe("smoke: agent against a notes directory", () => {
     );
 
     assert.equal(summary.logRelativePath.startsWith(".agent-bobik/"), true);
+  });
+
+  it("fails when the step limit is reached", async () => {
+    root = await mkdtemp(join(tmpdir(), "bobik-smoke-"));
+    await mkdir(join(root, "daily-notes"), { recursive: true });
+
+    const model = new MockLanguageModelV3({
+      modelId: "mock-model",
+      doGenerate: Array.from({ length: 25 }, (_, index) => ({
+        content: [
+          {
+            type: "tool-call" as const,
+            toolCallId: `call-${index}`,
+            toolName: "writeFile",
+            input: JSON.stringify({
+              path: `daily-notes/note-${index}.md`,
+              content: `note ${index}`,
+            }),
+          },
+        ],
+        finishReason: finish("tool-calls"),
+        usage: usage(),
+        warnings: [],
+      })),
+    });
+
+    await assert.rejects(
+      runNotesAgent({
+        cwd: root,
+        promptPath: "prompt.md",
+        prompt: "Keep writing notes forever.",
+        allowPath: "./daily-notes/**/*.md",
+        model,
+        timeoutMs: 30_000,
+      }),
+      /Step limit reached \(25 steps\)/,
+    );
+
+    const entries = await readdir(join(root, ".agent-bobik"));
+    const events = (
+      await readFile(join(root, ".agent-bobik", entries[0] ?? ""), "utf8")
+    )
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const last = events.at(-1);
+    assert.equal(last?.type, "run-end");
+    assert.equal(last?.status, "error");
+    assert.match(String(last?.error), /Step limit reached/);
+    assert.equal(
+      events.filter((event) => event.type === "step-finish").length,
+      25,
+    );
   });
 });

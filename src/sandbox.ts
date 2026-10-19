@@ -54,6 +54,7 @@ export async function createNotesSandbox(
   const { tools } = await createBashTool({
     sandbox: bash,
     destination: "/",
+    maxOutputLength: Number.MAX_SAFE_INTEGER,
     onBeforeBashCall: ({ command }) => {
       const denied = denyPolicy.check(command);
       if (!denied) {

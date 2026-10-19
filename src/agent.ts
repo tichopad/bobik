@@ -120,7 +120,8 @@ export async function runNotesAgent(
       stopWhen: stepCountIs(MAX_STEPS),
       onStepFinish: async (step) => {
         stepIndex += 1;
-        trackedUsage = step.usage;
+        steps = stepIndex;
+        trackedUsage = addUsage(trackedUsage, step.usage);
         await logStep(log, stepIndex, step, writtenFiles);
       },
     });
@@ -346,6 +347,45 @@ function emptyUsage(): LanguageModelUsage {
     },
     totalTokens: 0,
   };
+}
+
+function addUsage(
+  left: LanguageModelUsage,
+  right: LanguageModelUsage,
+): LanguageModelUsage {
+  return {
+    inputTokens: sum(left.inputTokens, right.inputTokens),
+    inputTokenDetails: {
+      noCacheTokens: sum(
+        left.inputTokenDetails.noCacheTokens,
+        right.inputTokenDetails.noCacheTokens,
+      ),
+      cacheReadTokens: sum(
+        left.inputTokenDetails.cacheReadTokens,
+        right.inputTokenDetails.cacheReadTokens,
+      ),
+      cacheWriteTokens: sum(
+        left.inputTokenDetails.cacheWriteTokens,
+        right.inputTokenDetails.cacheWriteTokens,
+      ),
+    },
+    outputTokens: sum(left.outputTokens, right.outputTokens),
+    outputTokenDetails: {
+      textTokens: sum(
+        left.outputTokenDetails.textTokens,
+        right.outputTokenDetails.textTokens,
+      ),
+      reasoningTokens: sum(
+        left.outputTokenDetails.reasoningTokens,
+        right.outputTokenDetails.reasoningTokens,
+      ),
+    },
+    totalTokens: sum(left.totalTokens, right.totalTokens),
+  };
+}
+
+function sum(left: number | undefined, right: number | undefined): number {
+  return (left ?? 0) + (right ?? 0);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
