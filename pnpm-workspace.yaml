@@ -1,0 +1,6 @@
+minimumReleaseAgeExclude:
+  - '@ai-sdk/gateway@3.0.218'
+  - ai@6.0.310
+allowBuilds:
+  '@mongodb-js/zstd': false
+  node-liblzma: false
