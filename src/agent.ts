@@ -1,0 +1,357 @@
+import {
+  stepCountIs,
+  ToolLoopAgent,
+  type LanguageModel,
+  type LanguageModelUsage,
+  type StepResult,
+} from "ai";
+import { RunError, UsageError } from "./errors.ts";
+import { AuditLog } from "./logger.ts";
+import { createNotesSandbox, type NotesSandbox } from "./sandbox.ts";
+
+export const MAX_STEPS = 25;
+export const RUN_TIMEOUT_MS = 5 * 60 * 1000;
+
+export interface SystemPromptOptions {
+  cwd: string;
+  allowPath: string;
+  deny?: readonly string[];
+  now?: Date;
+  timeZone?: string;
+}
+
+export interface RunNotesAgentOptions {
+  /** Host working directory and sandbox root. */
+  cwd: string;
+  /** Path shown in the audit log; the prompt itself has already been read. */
+  promptPath: string;
+  /** Task instructions read from the prompt file by the host. */
+  prompt: string;
+  /** Allow-path glob, resolved relative to cwd. */
+  allowPath: string;
+  deny?: readonly string[];
+  /** Model instance; the CLI passes Fireworks, tests pass a mock. */
+  model: LanguageModel;
+  now?: Date;
+  timeZone?: string;
+  /** Optional caller abort signal, combined with the run timeout. */
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
+export interface RunSummary {
+  text: string;
+  steps: number;
+  filesWritten: number;
+  usage: LanguageModelUsage;
+  durationMs: number;
+  logPath: string;
+  logRelativePath: string;
+  modelId: string;
+}
+
+/**
+ * Run one notes-agent invocation: create the audit log, sandbox, and agent,
+ * stream no output, and return the final message plus run statistics.
+ */
+export async function runNotesAgent(
+  options: RunNotesAgentOptions,
+): Promise<RunSummary> {
+  const now = options.now ?? new Date();
+  const timeZone = options.timeZone ?? resolveTimeZone();
+  const deny = options.deny ?? [];
+  const modelId = modelIdOf(options.model);
+  const startedAt = Date.now();
+
+  let log: AuditLog;
+  try {
+    log = await AuditLog.create(options.cwd, now);
+  } catch (error) {
+    throw new RunError(
+      `Could not create the audit log: ${errorMessage(error)}`,
+      {
+        cause: error,
+      },
+    );
+  }
+
+  await log.log("run-start", {
+    flags: {
+      prompt: options.promptPath,
+      allowPath: options.allowPath,
+      deny,
+      model: modelId,
+    },
+    cwd: options.cwd,
+    dateTime: now.toISOString(),
+    localDateTime: formatLocalDateTime(now, timeZone),
+    timeZone,
+  });
+
+  const timeoutMs = options.timeoutMs ?? RUN_TIMEOUT_MS;
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  const signal = options.signal
+    ? AbortSignal.any([options.signal, timeoutSignal])
+    : timeoutSignal;
+
+  const writtenFiles = new Set<string>();
+  let stepIndex = 0;
+  let trackedUsage = emptyUsage();
+  let steps = 0;
+
+  try {
+    const sandbox = await createNotesSandbox({
+      cwd: options.cwd,
+      allowPath: options.allowPath,
+      deny,
+      timeZone,
+    });
+
+    const agent = new ToolLoopAgent({
+      model: options.model,
+      tools: sandbox.tools,
+      instructions: buildSystemPrompt({
+        cwd: options.cwd,
+        allowPath: options.allowPath,
+        deny,
+        now,
+        timeZone,
+      }),
+      stopWhen: stepCountIs(MAX_STEPS),
+      onStepFinish: async (step) => {
+        stepIndex += 1;
+        trackedUsage = step.usage;
+        await logStep(log, stepIndex, step, writtenFiles);
+      },
+    });
+
+    const result = await agent.generate({
+      prompt: options.prompt,
+      abortSignal: signal,
+    });
+
+    steps = result.steps.length;
+    trackedUsage = result.totalUsage;
+
+    if (result.finishReason === "error") {
+      throw new RunError("The model stopped because of an error.");
+    }
+    if (steps >= MAX_STEPS && result.finishReason === "tool-calls") {
+      throw new RunError(
+        `Step limit reached (${MAX_STEPS} steps) before the agent finished.`,
+      );
+    }
+
+    const durationMs = Date.now() - startedAt;
+    await log.log("run-end", {
+      status: "success",
+      durationMs,
+      steps,
+      filesWritten: [...writtenFiles].sort(),
+      totalUsage: result.totalUsage,
+    });
+    await log.flush();
+
+    return {
+      text: result.text,
+      steps,
+      filesWritten: writtenFiles.size,
+      usage: result.totalUsage,
+      durationMs,
+      logPath: log.path,
+      logRelativePath: log.relativePath,
+      modelId,
+    };
+  } catch (error) {
+    const durationMs = Date.now() - startedAt;
+    const failure = normalizeRunError(error, timeoutSignal, timeoutMs);
+    await log.log("run-end", {
+      status: "error",
+      error: failure.message,
+      durationMs,
+      steps,
+      totalUsage: trackedUsage,
+    });
+    await log.flush();
+    throw failure;
+  }
+}
+
+/** Built-in system prompt applied on top of the user's prompt file. */
+export function buildSystemPrompt(options: SystemPromptOptions): string {
+  const now = options.now ?? new Date();
+  const timeZone = options.timeZone ?? resolveTimeZone();
+  const deny = options.deny ?? [];
+  const lines = [
+    "You are Bobik, a one-shot CLI agent that maintains a directory of Markdown notes.",
+    "",
+    `Current local date/time: ${formatLocalDateTime(now, timeZone)}`,
+    `Timezone: ${timeZone}`,
+    `Working directory: ${options.cwd}`,
+    `Allowed file glob: ${options.allowPath}`,
+    "",
+    "You may only read, create, edit, or delete files whose paths match the allowed glob. Attempts outside it fail with EACCES. Dotfiles and dot-directories are hidden unless the glob explicitly targets them; the .agent-bobik audit directory is never available to you.",
+    "",
+  ];
+
+  if (deny.length > 0) {
+    lines.push(
+      `Denied bash commands: ${deny.join(", ")}. Attempts return exit code 126.`,
+      "",
+    );
+  }
+
+  lines.push(
+    "Tool usage:",
+    "- Use readFile and writeFile for reading and editing note content.",
+    "- Use bash for searching and exploration (for example ls, grep, find, cat, and date).",
+    "- Prefer writeFile over shell redirection when creating or replacing a note.",
+    "",
+    "All relative paths are resolved from the working directory. When the task is complete, or when there is nothing to do, stop and reply with a concise summary. This is a one-shot run: do not ask questions or expect follow-up messages.",
+  );
+
+  return lines.join("\n");
+}
+
+/** The IANA timezone used by the host, falling back to UTC. */
+export function resolveTimeZone(): string {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+}
+
+/** Format a date in a specific timezone using a stable, human-readable form. */
+export function formatLocalDateTime(date: Date, timeZone: string): string {
+  const datePart = new Intl.DateTimeFormat("en-US", {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+    timeZone,
+  }).format(date);
+  const timePart = new Intl.DateTimeFormat("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+    timeZone,
+  }).format(date);
+  const zonePart =
+    new Intl.DateTimeFormat("en-US", {
+      timeZoneName: "short",
+      timeZone,
+    })
+      .formatToParts(date)
+      .find((part) => part.type === "timeZoneName")?.value ?? timeZone;
+
+  return `${datePart} at ${timePart} ${zonePart}`;
+}
+
+async function logStep(
+  log: AuditLog,
+  stepIndex: number,
+  step: StepResult<NotesSandbox["tools"]>,
+  writtenFiles: Set<string>,
+): Promise<void> {
+  for (const part of step.content) {
+    switch (part.type) {
+      case "text":
+        await log.log("assistant-text", {
+          kind: "text",
+          step: stepIndex,
+          text: part.text,
+        });
+        break;
+      case "reasoning":
+        await log.log("assistant-text", {
+          kind: "reasoning",
+          step: stepIndex,
+          text: part.text,
+        });
+        break;
+      case "tool-call":
+        await log.log("tool-call", {
+          step: stepIndex,
+          toolName: part.toolName,
+          toolCallId: part.toolCallId,
+          input: part.input,
+        });
+        break;
+      case "tool-result":
+        if (
+          part.toolName === "writeFile" &&
+          isRecord(part.input) &&
+          typeof part.input.path === "string"
+        ) {
+          writtenFiles.add(part.input.path);
+        }
+        await log.log("tool-result", {
+          step: stepIndex,
+          toolName: part.toolName,
+          toolCallId: part.toolCallId,
+          output: part.output,
+        });
+        break;
+      case "tool-error":
+        await log.log("tool-result", {
+          step: stepIndex,
+          toolName: part.toolName,
+          toolCallId: part.toolCallId,
+          error: errorMessage(part.error),
+        });
+        break;
+    }
+  }
+
+  await log.log("step-finish", {
+    step: stepIndex,
+    usage: step.usage,
+  });
+}
+
+function normalizeRunError(
+  error: unknown,
+  timeoutSignal: AbortSignal,
+  timeoutMs: number,
+): Error {
+  if (error instanceof UsageError || error instanceof RunError) {
+    return error;
+  }
+  if (
+    timeoutSignal.aborted &&
+    timeoutSignal.reason instanceof Error &&
+    timeoutSignal.reason.name === "TimeoutError"
+  ) {
+    return new RunError(`Run timed out after ${timeoutMs}ms.`, {
+      cause: error,
+    });
+  }
+  return new RunError(errorMessage(error), { cause: error });
+}
+
+function modelIdOf(model: LanguageModel): string {
+  return typeof model === "string" ? model : model.modelId;
+}
+
+function emptyUsage(): LanguageModelUsage {
+  return {
+    inputTokens: 0,
+    inputTokenDetails: {
+      noCacheTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+    },
+    outputTokens: 0,
+    outputTokenDetails: {
+      textTokens: 0,
+      reasoningTokens: 0,
+    },
+    totalTokens: 0,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}

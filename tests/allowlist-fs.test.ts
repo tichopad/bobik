@@ -256,4 +256,11 @@ describe("AllowlistFs", () => {
       fs.symlink("/daily-notes/2026-10-18.md", "/daily-notes/link.md"),
     );
   });
+
+  it("provides the standard devices bash expects", async () => {
+    await fs.writeFile("/dev/null", "discarded");
+    assert.equal(await fs.readFile("/dev/null"), "");
+    assert.equal(await fs.exists("/dev/null"), true);
+    assert.equal((await fs.stat("/dev/null")).isFile, true);
+  });
 });

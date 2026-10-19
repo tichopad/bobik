@@ -1,4 +1,5 @@
 import { posix } from "node:path";
+import { unsafeBytesFromLatin1 } from "just-bash";
 import type {
   BufferEncoding,
   ByteString,
@@ -35,6 +36,18 @@ type WriteFileOptions = {
 };
 
 /**
+ * Virtual device files that bash expects to exist. They never touch the host
+ * filesystem and are safe to allow regardless of the note glob.
+ */
+const DEVICE_PATHS: ReadonlySet<string> = new Set([
+  "/dev/null",
+  "/dev/zero",
+  "/dev/stdin",
+  "/dev/stdout",
+  "/dev/stderr",
+]);
+
+/**
  * A filesystem wrapper that enforces an allowlist glob.
  *
  * This is the single enforcement point for all three tools: bash commands,
@@ -56,10 +69,16 @@ export class AllowlistFs implements IFileSystem {
     path: string,
     options?: ReadFileOptions | BufferEncoding,
   ): Promise<string> {
+    if (this.device(path)) {
+      return "";
+    }
     return this.inner.readFile(this.requireFile(path, "open"), options);
   }
 
   async readFileBytes(path: string): Promise<ByteString> {
+    if (this.device(path)) {
+      return unsafeBytesFromLatin1("");
+    }
     const target = this.requireFile(path, "open");
     if (!this.inner.readFileBytes) {
       throw denied(path, "open");
@@ -68,6 +87,9 @@ export class AllowlistFs implements IFileSystem {
   }
 
   async readFileBuffer(path: string): Promise<Uint8Array> {
+    if (this.device(path)) {
+      return new Uint8Array(0);
+    }
     return this.inner.readFileBuffer(this.requireFile(path, "open"));
   }
 
@@ -76,6 +98,9 @@ export class AllowlistFs implements IFileSystem {
     content: FileContent,
     options?: WriteFileOptions | BufferEncoding,
   ): Promise<void> {
+    if (this.device(path)) {
+      return;
+    }
     return this.inner.writeFile(
       this.requireFile(path, "write"),
       content,
@@ -88,6 +113,9 @@ export class AllowlistFs implements IFileSystem {
     content: FileContent,
     options?: WriteFileOptions | BufferEncoding,
   ): Promise<void> {
+    if (this.device(path)) {
+      return;
+    }
     return this.inner.appendFile(
       this.requireFile(path, "append"),
       content,
@@ -99,6 +127,9 @@ export class AllowlistFs implements IFileSystem {
     const target = this.tryNormalize(path);
     if (!target) {
       return false;
+    }
+    if (DEVICE_PATHS.has(target)) {
+      return true;
     }
 
     if (this.allowlist.matches(target)) {
@@ -116,10 +147,18 @@ export class AllowlistFs implements IFileSystem {
   }
 
   async stat(path: string): Promise<FsStat> {
+    const device = this.device(path);
+    if (device) {
+      return deviceStat();
+    }
     return this.policyStat(path, "stat");
   }
 
   async lstat(path: string): Promise<FsStat> {
+    const device = this.device(path);
+    if (device) {
+      return deviceStat();
+    }
     return this.policyLstat(path, "lstat");
   }
 
@@ -149,6 +188,9 @@ export class AllowlistFs implements IFileSystem {
   }
 
   async rm(path: string, options?: RmOptions): Promise<void> {
+    if (this.device(path)) {
+      return;
+    }
     const target = this.normalize(path);
     let info: FsStat;
     try {
@@ -224,13 +266,17 @@ export class AllowlistFs implements IFileSystem {
   }
 
   getAllPaths(): string[] {
-    return this.inner.getAllPaths().filter((path) => {
+    const allowed = this.inner.getAllPaths().filter((path) => {
       const target = this.tryNormalize(path);
       return target !== undefined && this.allowlist.matches(target);
     });
+    return [...DEVICE_PATHS, ...allowed];
   }
 
   async chmod(path: string, mode: number): Promise<void> {
+    if (this.device(path)) {
+      return;
+    }
     return this.inner.chmod(this.requireFile(path, "chmod"), mode);
   }
 
@@ -251,6 +297,10 @@ export class AllowlistFs implements IFileSystem {
   }
 
   async realpath(path: string): Promise<string> {
+    const device = this.device(path);
+    if (device) {
+      return device;
+    }
     const target = this.normalize(path);
     if (
       !this.allowlist.matches(target) &&
@@ -262,6 +312,9 @@ export class AllowlistFs implements IFileSystem {
   }
 
   async utimes(path: string, atime: Date, mtime: Date): Promise<void> {
+    if (this.device(path)) {
+      return;
+    }
     return this.inner.utimes(this.requireFile(path, "utimes"), atime, mtime);
   }
 
@@ -388,6 +441,13 @@ export class AllowlistFs implements IFileSystem {
     return target;
   }
 
+  private device(path: string): string | undefined {
+    const target = this.tryNormalize(path);
+    return target !== undefined && DEVICE_PATHS.has(target)
+      ? target
+      : undefined;
+  }
+
   private requireTraversable(path: string, operation: string): string {
     const target = this.normalize(path);
     if (!this.allowlist.isTraversable(target)) {
@@ -420,6 +480,17 @@ function denied(path: string, operation: string): Error {
   const error = new Error(`EACCES: permission denied, ${operation} '${path}'`);
   (error as NodeJS.ErrnoException).code = "EACCES";
   return error;
+}
+
+function deviceStat(): FsStat {
+  return {
+    isFile: true,
+    isDirectory: false,
+    isSymbolicLink: false,
+    mode: 0o666,
+    size: 0,
+    mtime: new Date(0),
+  };
 }
 
 function isNotFound(error: unknown): boolean {
