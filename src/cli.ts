@@ -15,6 +15,8 @@ export const DEFAULT_MODEL =
 
 const VERSION = "0.1.0";
 
+const ANSI_ESCAPE = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
+
 const HELP = `bobik — a single-purpose AI agent for Markdown notes
 
 Usage:
@@ -241,7 +243,8 @@ function isNotFound(error: unknown): boolean {
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(ANSI_ESCAPE, "");
 }
 
 function isEntrypoint(): boolean {
