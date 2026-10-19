@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -151,7 +158,6 @@ describe("cli", () => {
 });
 
 async function findOnlyLog(root: string): Promise<string> {
-  const { readdir } = await import("node:fs/promises");
   const entries = await readdir(join(root, ".agent-bobik"));
   assert.equal(entries.length, 1);
   return join(root, ".agent-bobik", entries[0] ?? "");
