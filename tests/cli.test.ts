@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import {
+  mkdir,
   mkdtemp,
   readdir,
   readFile,
@@ -11,8 +12,8 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, it } from "node:test";
-import { parseDenyList } from "../src/cli.ts";
+import { afterEach, beforeEach, describe, it } from "node:test";
+import { allowPathWarning, parseDenyList } from "../src/cli.ts";
 
 const cliPath = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const launcherPath = fileURLToPath(
@@ -63,6 +64,48 @@ describe("parseDenyList", () => {
 
   it("returns an empty list when the flag is absent", () => {
     assert.deepEqual(parseDenyList(undefined), []);
+  });
+});
+
+describe("allowPathWarning", () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "bobik-cli-"));
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("warns when an escaped base directory does not exist", () => {
+    const warning = allowPathWarning(root, "./daily\\ notes/**/*.md");
+
+    assert.match(warning ?? "", /does not exist/);
+    assert.match(warning ?? "", /backslash/);
+  });
+
+  it("stays quiet when only an unescaped segment is missing", async () => {
+    await mkdir(join(root, "daily notes"));
+
+    assert.equal(
+      allowPathWarning(root, "./daily\\ notes/2026/**/*.md"),
+      undefined,
+    );
+  });
+
+  it("stays quiet when the escaped base directory exists", async () => {
+    await mkdir(join(root, "daily notes"));
+
+    assert.equal(allowPathWarning(root, "./daily\\ notes/**/*.md"), undefined);
+  });
+
+  it("stays quiet for globs without backslashes", () => {
+    assert.equal(allowPathWarning(root, "./missing-dir/**/*.md"), undefined);
+  });
+
+  it("stays quiet for invalid globs", () => {
+    assert.equal(allowPathWarning(root, "../**/*.md"), undefined);
   });
 });
 

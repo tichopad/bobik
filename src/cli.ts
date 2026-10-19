@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { createFireworks } from "@ai-sdk/fireworks";
 import { defineCommand, runCommand, showUsage, type CommandDef } from "citty";
 import { MAX_STEPS, RUN_TIMEOUT_MS, runNotesAgent } from "./agent.ts";
+import { compileAllowlist } from "./allowlist.ts";
 import { requireApiKey, writeApiKey } from "./config.ts";
 import { RunError, UsageError } from "./errors.ts";
 
@@ -143,6 +144,10 @@ async function runDefault(args: DefaultRunArgs): Promise<void> {
   const prompt = await readPrompt(promptPath);
   const apiKey = await requireApiKey();
   const deny = parseDenyList(args.deny);
+  const warning = allowPathWarning(cwd, args.allowPath);
+  if (warning) {
+    process.stderr.write(warning);
+  }
   const provider = createFireworks({ apiKey });
 
   const summary = await runNotesAgent({
@@ -178,6 +183,45 @@ export function parseDenyList(value: string | undefined): string[] {
     .split(",")
     .map((entry) => entry.trim())
     .filter(Boolean);
+}
+
+/**
+ * Detect the shell-quoting pitfall in --allow-path and return a warning, or
+ * undefined when the glob looks fine.
+ *
+ * Inside shell quotes a backslash is passed through verbatim, so a glob like
+ * "./Daily\ Notes" reaches bobik with a literal backslash before the space.
+ * Escapes are resolved for matching and traversal, but a backslashed segment
+ * that names no real directory is almost always a quoting mistake or a typo,
+ * so it is reported before the run starts.
+ */
+export function allowPathWarning(
+  cwd: string,
+  allowPath: string,
+): string | undefined {
+  let escapedDirectories: readonly string[];
+  try {
+    escapedDirectories = compileAllowlist(
+      cwd,
+      allowPath,
+    ).escapedBaseDirectories;
+  } catch {
+    // Invalid globs surface as usage errors when the run starts.
+    return undefined;
+  }
+
+  const missing = escapedDirectories
+    .map((directory) => join(cwd, directory))
+    .find((directory) => !existsSync(directory));
+  if (!missing) {
+    return undefined;
+  }
+
+  return [
+    `bobik: warning: --allow-path names a directory that does not exist: ${missing}`,
+    `bobik: if the backslash was meant for the shell, quote the glob without escapes: --allow-path "./Daily Notes/**/*.md"`,
+    "",
+  ].join("\n");
 }
 
 function formatSummary(summary: {

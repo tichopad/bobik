@@ -17,6 +17,14 @@ export class PathEscapeError extends Error {
 export interface Allowlist {
   /** Normalized virtual glob, rooted at /. */
   readonly pattern: string;
+  /**
+   * Unescaped virtual paths of the glob's leading literal segments whose raw
+   * form contains a backslash. A backslash reaching the process verbatim
+   * usually means the shell never consumed the user's escape, so a missing
+   * directory here is worth reporting; segments without escapes are omitted
+   * so runs that create new directories stay quiet.
+   */
+  readonly escapedBaseDirectories: readonly string[];
   /** True when the virtual path matches the allow glob. */
   matches(path: string): boolean;
   /** True when a directory may be listed or navigated. */
@@ -95,6 +103,11 @@ export function compileAllowlist(cwd: string, allowGlob: string): Allowlist {
   const pattern = virtualPatternFromRelative(relativePattern);
   const matcher = picomatch(pattern, { dot: false });
   const segments = pattern.split("/").filter(Boolean);
+  // picomatch resolves backslash escapes while matching, so traversal and
+  // existence checks compare real entry names against the unescaped form of
+  // literal segments; otherwise "./Daily\ Notes/**/*.md" would match files
+  // under "Daily Notes" while blocking navigation into the directory itself.
+  const literalSegments = segments.map(unescapeGlobSegment);
 
   let baseSegmentCount = 0;
   while (
@@ -103,18 +116,27 @@ export function compileAllowlist(cwd: string, allowGlob: string): Allowlist {
   ) {
     baseSegmentCount += 1;
   }
+  const escapedBaseDirectories: string[] = [];
+  let prefix = "";
+  for (let index = 0; index < baseSegmentCount; index += 1) {
+    prefix += `/${literalSegments[index] ?? ""}`;
+    if ((segments[index] ?? "").includes("\\")) {
+      escapedBaseDirectories.push(prefix);
+    }
+  }
   const base =
     baseSegmentCount === 0
       ? "/"
-      : `/${segments.slice(0, baseSegmentCount).join("/")}`;
+      : `/${literalSegments.slice(0, baseSegmentCount).join("/")}`;
   const explicitDotSegments = new Set(
-    segments.filter(
+    literalSegments.filter(
       (segment) => segment.startsWith(".") && !MAGIC_SEGMENT.test(segment),
     ),
   );
 
   return {
     pattern,
+    escapedBaseDirectories,
     matches(path: string): boolean {
       try {
         return matcher(normalizeVirtualPath(path));
@@ -160,4 +182,9 @@ function virtualPatternFromRelative(relativePattern: string): string {
   const slashPattern = relativePattern.split(sep).join("/");
   const trimmed = slashPattern.replace(/^\/+/, "");
   return trimmed ? `/${trimmed}` : "/";
+}
+
+/** Resolve glob escape sequences in a non-magic segment to literal characters. */
+function unescapeGlobSegment(segment: string): string {
+  return segment.replace(/\\(.)/g, "$1");
 }

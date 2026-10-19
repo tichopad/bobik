@@ -85,6 +85,36 @@ describe("compileAllowlist", () => {
     const explicit = compileAllowlist("/notes", ".notes/**/*.md");
     assert.equal(explicit.matches("/.notes/a.md"), true);
   });
+
+  it("resolves backslash escapes in the traversal base", () => {
+    const allowlist = compileAllowlist("/notes", "./daily\\ notes/**/*.md");
+
+    assert.equal(allowlist.pattern, "/daily\\ notes/**/*.md");
+    assert.equal(allowlist.matches("/daily notes/2026-10-18.md"), true);
+    assert.equal(allowlist.isTraversable("/daily notes"), true);
+  });
+
+  it("reports escaped base directories for existence checks", () => {
+    const allowlist = compileAllowlist(
+      "/notes",
+      "./daily\\ notes/2026/**/*.md",
+    );
+
+    assert.deepEqual(allowlist.escapedBaseDirectories, ["/daily notes"]);
+  });
+
+  it("omits escaped base directories for plain globs", () => {
+    const allowlist = compileAllowlist("/notes", "./daily-notes/2026/**/*.md");
+
+    assert.deepEqual(allowlist.escapedBaseDirectories, []);
+  });
+
+  it("keeps escaped magic segments out of the traversal base", () => {
+    const allowlist = compileAllowlist("/notes", "daily\\*notes/2026.md");
+
+    assert.equal(allowlist.matches("/daily*notes/2026.md"), true);
+    assert.equal(allowlist.isTraversable("/daily*notes"), true);
+  });
 });
 
 describe("AllowlistFs", () => {
@@ -181,6 +211,21 @@ describe("AllowlistFs", () => {
       entries.map((entry) => [entry.name, entry.isDirectory]),
       [["daily-notes", true]],
     );
+  });
+
+  it("traverses directories whose names are backslash-escaped in the glob", async () => {
+    await mkdir(join(fixture.root, "daily notes"));
+    await writeFile(
+      join(fixture.root, "daily notes", "2026-10-19.md"),
+      "today",
+    );
+
+    const escaped = new AllowlistFs(fixture.inner, {
+      allowlist: compileAllowlist(fixture.root, "./daily\\ notes/**/*.md"),
+    });
+
+    assert.deepEqual(await escaped.readdir("/"), ["daily notes"]);
+    assert.equal(await escaped.readFile("/daily notes/2026-10-19.md"), "today");
   });
 
   it("lists matching files while hiding non-matching and dot entries", async () => {
