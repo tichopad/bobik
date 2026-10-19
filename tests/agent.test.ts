@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { buildSystemPrompt, formatLocalDateTime } from "../src/agent.ts";
+import {
+  buildSystemPrompt,
+  formatLocalDateTime,
+  resolveTimeZone,
+} from "../src/agent.ts";
 
 describe("formatLocalDateTime", () => {
   it("formats in the requested timezone", () => {
@@ -15,7 +19,54 @@ describe("formatLocalDateTime", () => {
       "Monday, October 19, 2026 at 17:55:00 UTC",
     );
   });
+
+  it("falls back to host-local time for an invalid zone", () => {
+    assert.match(
+      formatLocalDateTime(new Date("2026-10-19T17:55:00.123Z"), "Etc/Unknown"),
+      /^Monday, October 19, 2026 at \d{2}:\d{2}:\d{2} /,
+    );
+  });
 });
+
+describe("resolveTimeZone", () => {
+  const date = new Date("2026-10-19T23:30:00Z");
+
+  it("uses a valid IANA TZ value", () => {
+    withTimeZone("America/New_York", () => {
+      assert.equal(resolveTimeZone(date), "America/New_York");
+    });
+  });
+
+  it("converts simple POSIX offsets to a fixed IANA zone", () => {
+    withTimeZone("UTC-5", () => {
+      assert.equal(resolveTimeZone(date), "Etc/GMT-5");
+      assert.equal(
+        formatLocalDateTime(date, resolveTimeZone(date)),
+        "Tuesday, October 20, 2026 at 04:30:00 GMT+5",
+      );
+    });
+  });
+
+  it("treats an empty TZ as UTC", () => {
+    withTimeZone("", () => {
+      assert.equal(resolveTimeZone(date), "Etc/UTC");
+    });
+  });
+});
+
+function withTimeZone(value: string, run: () => void): void {
+  const previous = process.env.TZ;
+  process.env.TZ = value;
+  try {
+    run();
+  } finally {
+    if (previous === undefined) {
+      delete process.env.TZ;
+    } else {
+      process.env.TZ = previous;
+    }
+  }
+}
 
 describe("buildSystemPrompt", () => {
   const date = new Date("2026-10-19T17:55:00.123Z");

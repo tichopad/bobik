@@ -105,6 +105,7 @@ export async function runNotesAgent(
       allowPath: options.allowPath,
       deny,
       timeZone,
+      onFileWrite: (path) => writtenFiles.add(path),
     });
 
     const agent = new ToolLoopAgent({
@@ -122,7 +123,7 @@ export async function runNotesAgent(
         stepIndex += 1;
         steps = stepIndex;
         trackedUsage = addUsage(trackedUsage, step.usage);
-        await logStep(log, stepIndex, step, writtenFiles);
+        await logStep(log, stepIndex, step);
       },
     });
 
@@ -169,11 +170,23 @@ export async function runNotesAgent(
   } catch (error) {
     const durationMs = Date.now() - startedAt;
     const failure = normalizeRunError(error, timeoutSignal, timeoutMs);
+    if (failure instanceof RunError) {
+      failure.summary = {
+        steps,
+        filesWritten: writtenFiles.size,
+        usage: trackedUsage,
+        durationMs,
+        logPath: log.path,
+        logRelativePath: log.relativePath,
+        modelId,
+      };
+    }
     await log.log("run-end", {
       status: "error",
       error: failure.message,
       durationMs,
       steps,
+      filesWritten: [...writtenFiles].sort(),
       totalUsage: trackedUsage,
     });
     await log.flush();
@@ -218,34 +231,82 @@ export function buildSystemPrompt(options: SystemPromptOptions): string {
   return lines.join("\n");
 }
 
-/** The IANA timezone used by the host, falling back to UTC. */
-export function resolveTimeZone(): string {
-  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+/** The IANA timezone used by the host, falling back to a fixed-offset zone. */
+export function resolveTimeZone(now: Date = new Date()): string {
+  const fromEnvironment = process.env.TZ?.trim();
+
+  if (fromEnvironment && isValidTimeZone(fromEnvironment)) {
+    return fromEnvironment;
+  }
+
+  if (!fromEnvironment) {
+    const detected = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (detected && isValidTimeZone(detected)) {
+      return detected;
+    }
+  }
+
+  // POSIX TZ values such as `UTC-5` are not IANA names. Use the host's
+  // current offset so the prompt, the log filename, and `date` agree.
+  return timeZoneFromCurrentOffset(now) ?? "UTC";
+}
+
+function isValidTimeZone(timeZone: string): boolean {
+  if (!timeZone) {
+    return false;
+  }
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function timeZoneFromCurrentOffset(now: Date): string | undefined {
+  const offsetMinutes = -now.getTimezoneOffset();
+  if (offsetMinutes === 0) {
+    return "Etc/UTC";
+  }
+  if (offsetMinutes % 60 !== 0) {
+    return undefined;
+  }
+
+  const hours = Math.abs(offsetMinutes) / 60;
+  if (hours > 14) {
+    return undefined;
+  }
+
+  // IANA's Etc/GMT signs are the opposite of POSIX offsets.
+  return `Etc/GMT${offsetMinutes > 0 ? "-" : "+"}${hours}`;
 }
 
 /** Format a date in a specific timezone using a stable, human-readable form. */
 export function formatLocalDateTime(date: Date, timeZone: string): string {
+  const zone = isValidTimeZone(timeZone) ? timeZone : undefined;
   const datePart = new Intl.DateTimeFormat("en-US", {
     weekday: "long",
     month: "long",
     day: "numeric",
     year: "numeric",
-    timeZone,
+    ...(zone ? { timeZone: zone } : {}),
   }).format(date);
   const timePart = new Intl.DateTimeFormat("en-GB", {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
     hourCycle: "h23",
-    timeZone,
+    ...(zone ? { timeZone: zone } : {}),
   }).format(date);
   const zonePart =
     new Intl.DateTimeFormat("en-US", {
       timeZoneName: "short",
-      timeZone,
+      ...(zone ? { timeZone: zone } : {}),
     })
       .formatToParts(date)
-      .find((part) => part.type === "timeZoneName")?.value ?? timeZone;
+      .find((part) => part.type === "timeZoneName")?.value ??
+    zone ??
+    "local";
 
   return `${datePart} at ${timePart} ${zonePart}`;
 }
@@ -254,7 +315,6 @@ async function logStep(
   log: AuditLog,
   stepIndex: number,
   step: StepResult<NotesSandbox["tools"]>,
-  writtenFiles: Set<string>,
 ): Promise<void> {
   for (const part of step.content) {
     switch (part.type) {
@@ -281,13 +341,6 @@ async function logStep(
         });
         break;
       case "tool-result":
-        if (
-          part.toolName === "writeFile" &&
-          isRecord(part.input) &&
-          typeof part.input.path === "string"
-        ) {
-          writtenFiles.add(part.input.path);
-        }
         await log.log("tool-result", {
           step: stepIndex,
           toolName: part.toolName,

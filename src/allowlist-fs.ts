@@ -19,6 +19,8 @@ import {
 
 export interface AllowlistFsOptions {
   allowlist: Allowlist;
+  /** Called after a file is created or modified through this filesystem. */
+  onWrite?: (path: string) => void;
 }
 
 interface DirentEntry {
@@ -62,10 +64,12 @@ const PROTECTED_DIRECTORY = "/.agent-bobik";
 export class AllowlistFs implements IFileSystem {
   private readonly inner: IFileSystem;
   private readonly allowlist: Allowlist;
+  private readonly onWrite: ((path: string) => void) | undefined;
 
   constructor(inner: IFileSystem, options: AllowlistFsOptions) {
     this.inner = inner;
     this.allowlist = options.allowlist;
+    this.onWrite = options.onWrite;
   }
 
   async readFile(
@@ -104,11 +108,9 @@ export class AllowlistFs implements IFileSystem {
     if (this.device(path)) {
       return;
     }
-    return this.inner.writeFile(
-      this.requireFile(path, "write"),
-      content,
-      options,
-    );
+    const target = this.requireFile(path, "write");
+    await this.inner.writeFile(target, content, options);
+    this.notifyWrite(target);
   }
 
   async appendFile(
@@ -119,11 +121,9 @@ export class AllowlistFs implements IFileSystem {
     if (this.device(path)) {
       return;
     }
-    return this.inner.appendFile(
-      this.requireFile(path, "append"),
-      content,
-      options,
-    );
+    const target = this.requireFile(path, "append");
+    await this.inner.appendFile(target, content, options);
+    this.notifyWrite(target);
   }
 
   async exists(path: string): Promise<boolean> {
@@ -182,7 +182,10 @@ export class AllowlistFs implements IFileSystem {
     if (!this.inner.createExclusive) {
       throw denied(path, "create");
     }
-    return this.inner.createExclusive(target, options);
+    await this.inner.createExclusive(target, options);
+    if (!options.directory) {
+      this.notifyWrite(target);
+    }
   }
 
   async readdir(path: string): Promise<string[]> {
@@ -244,12 +247,15 @@ export class AllowlistFs implements IFileSystem {
         throw denied(dest, "cp");
       }
       await this.assertCopyMapping(source, target);
-      return this.inner.cp(source, target, options);
+      await this.inner.cp(source, target, options);
+      await this.notifyTreeWrites(source, target);
+      return;
     }
 
     this.requireFile(source, "cp");
     this.requireFile(target, "cp");
-    return this.inner.cp(source, target, options);
+    await this.inner.cp(source, target, options);
+    this.notifyWrite(target);
   }
 
   async mv(src: string, dest: string): Promise<void> {
@@ -262,12 +268,18 @@ export class AllowlistFs implements IFileSystem {
         throw denied(dest, "mv");
       }
       await this.assertCopyMapping(source, target);
-      return this.inner.mv(source, target);
+      const files = await this.collectTreeFiles(source);
+      await this.inner.mv(source, target);
+      for (const file of files) {
+        this.notifyWrite(posix.join(target, posix.relative(source, file)));
+      }
+      return;
     }
 
     this.requireFile(source, "mv");
     this.requireFile(target, "mv");
-    return this.inner.mv(source, target);
+    await this.inner.mv(source, target);
+    this.notifyWrite(target);
   }
 
   resolvePath(base: string, path: string): string {
@@ -364,6 +376,33 @@ export class AllowlistFs implements IFileSystem {
         };
       }),
     );
+  }
+
+  private async notifyTreeWrites(
+    source: string,
+    target: string,
+  ): Promise<void> {
+    for (const file of await this.collectTreeFiles(source)) {
+      this.notifyWrite(posix.join(target, posix.relative(source, file)));
+    }
+  }
+
+  private async collectTreeFiles(directory: string): Promise<string[]> {
+    const entries = await this.listWithTypes(directory);
+    const files: string[] = [];
+    for (const entry of entries) {
+      const child = posix.join(directory, entry.name);
+      if (entry.isDirectory) {
+        files.push(...(await this.collectTreeFiles(child)));
+      } else {
+        files.push(child);
+      }
+    }
+    return files;
+  }
+
+  private notifyWrite(path: string): void {
+    this.onWrite?.(path.startsWith("/") ? path.slice(1) : path);
   }
 
   private async policyStat(path: string, operation: string): Promise<FsStat> {

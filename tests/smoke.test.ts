@@ -197,6 +197,115 @@ describe("smoke: agent against a notes directory", () => {
     assert.equal(summary.logRelativePath.startsWith(".agent-bobik/"), true);
   });
 
+  it("counts files written through bash", async () => {
+    root = await mkdtemp(join(tmpdir(), "bobik-smoke-"));
+    await mkdir(join(root, "daily-notes"), { recursive: true });
+
+    const model = new MockLanguageModelV3({
+      modelId: "mock-model",
+      doGenerate: [
+        {
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "call-bash-write",
+              toolName: "bash",
+              input: JSON.stringify({
+                command: "printf 'from bash\\n' > daily-notes/from-bash.md",
+              }),
+            },
+          ],
+          finishReason: finish("tool-calls"),
+          usage: usage(),
+          warnings: [],
+        },
+        {
+          content: [{ type: "text", text: "Wrote the note with bash." }],
+          finishReason: finish("stop"),
+          usage: usage(),
+          warnings: [],
+        },
+      ],
+    });
+
+    const summary = await runNotesAgent({
+      cwd: root,
+      promptPath: "prompt.md",
+      prompt: "Write a note with bash.",
+      allowPath: "./daily-notes/**/*.md",
+      model,
+      timeoutMs: 30_000,
+    });
+
+    assert.equal(
+      await readFile(join(root, "daily-notes", "from-bash.md"), "utf8"),
+      "from bash\n",
+    );
+    assert.equal(summary.filesWritten, 1);
+    const events = (await readFile(summary.logPath, "utf8"))
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    assert.deepEqual(events.at(-1)?.filesWritten, ["daily-notes/from-bash.md"]);
+  });
+
+  it("blocks a denied command inside a nested shell", async () => {
+    root = await mkdtemp(join(tmpdir(), "bobik-smoke-"));
+    await mkdir(join(root, "daily-notes"), { recursive: true });
+    await writeFile(join(root, "daily-notes", "a.md"), "keep me");
+
+    const model = new MockLanguageModelV3({
+      modelId: "mock-model",
+      doGenerate: [
+        {
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "call-nested-deny",
+              toolName: "bash",
+              input: JSON.stringify({
+                command: "bash -c 'rm daily-notes/a.md'",
+              }),
+            },
+          ],
+          finishReason: finish("tool-calls"),
+          usage: usage(),
+          warnings: [],
+        },
+        {
+          content: [{ type: "text", text: "The removal was blocked." }],
+          finishReason: finish("stop"),
+          usage: usage(),
+          warnings: [],
+        },
+      ],
+    });
+
+    const summary = await runNotesAgent({
+      cwd: root,
+      promptPath: "prompt.md",
+      prompt: "Remove the note.",
+      allowPath: "./daily-notes/**/*.md",
+      deny: ["rm"],
+      model,
+      timeoutMs: 30_000,
+    });
+
+    assert.equal(
+      await readFile(join(root, "daily-notes", "a.md"), "utf8"),
+      "keep me",
+    );
+    const events = (await readFile(summary.logPath, "utf8"))
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const result = events.find(
+      (event) => event.type === "tool-result" && event.toolName === "bash",
+    )?.output as { stderr: string; exitCode: number } | undefined;
+    assert.equal(result?.exitCode, 126);
+    assert.match(String(result?.stderr), /Blocked: rm is denied/);
+  });
+
   it("fails when the step limit is reached", async () => {
     root = await mkdtemp(join(tmpdir(), "bobik-smoke-"));
     await mkdir(join(root, "daily-notes"), { recursive: true });
@@ -230,7 +339,17 @@ describe("smoke: agent against a notes directory", () => {
         model,
         timeoutMs: 30_000,
       }),
-      /Step limit reached \(25 steps\)/,
+      (error: unknown) => {
+        assert.match(String(error), /Step limit reached \(25 steps\)/);
+        const summary = (
+          error as {
+            summary?: { steps?: number; logRelativePath?: string };
+          }
+        ).summary;
+        assert.equal(summary?.steps, 25);
+        assert.match(String(summary?.logRelativePath), /^\.agent-bobik\//);
+        return true;
+      },
     );
 
     const entries = await readdir(join(root, ".agent-bobik"));

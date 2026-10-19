@@ -150,6 +150,29 @@ describe("AllowlistFs", () => {
     await assert.rejects(stat(join(fixture.root, "daily-notes", "new.md")));
   });
 
+  it("reports successful writes, copies and moves", async () => {
+    const writes: string[] = [];
+    const tracked = new AllowlistFs(fixture.inner, {
+      allowlist: compileAllowlist(fixture.root, "./daily-notes/**/*.md"),
+      onWrite: (path) => writes.push(path),
+    });
+
+    await tracked.writeFile("/daily-notes/a.md", "a");
+    await tracked.appendFile("/daily-notes/a.md", "b");
+    await tracked.mv("/daily-notes/a.md", "/daily-notes/b.md");
+    await tracked.cp("/daily-notes/b.md", "/daily-notes/c.md");
+    await tracked.mkdir("/daily-notes/archive", { recursive: true });
+    await tracked.cp("/daily-notes/c.md", "/daily-notes/archive/d.md");
+
+    assert.deepEqual(writes, [
+      "daily-notes/a.md",
+      "daily-notes/a.md",
+      "daily-notes/b.md",
+      "daily-notes/c.md",
+      "daily-notes/archive/d.md",
+    ]);
+  });
+
   it("lists the root but hides unreadable entries", async () => {
     assert.deepEqual(await fs.readdir("/"), ["daily-notes"]);
 

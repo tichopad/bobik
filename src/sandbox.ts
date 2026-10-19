@@ -13,6 +13,8 @@ export interface NotesSandboxOptions {
   deny?: readonly string[];
   /** Timezone name handed to the shell so `date` agrees with the prompt. */
   timeZone: string;
+  /** Called after any file is created or modified through the sandbox. */
+  onFileWrite?: (path: string) => void;
 }
 
 export interface NotesSandbox {
@@ -40,7 +42,10 @@ export async function createNotesSandbox(
     root: options.cwd,
     allowSymlinks: false,
   });
-  const fs = new AllowlistFs(inner, { allowlist });
+  const fs = new AllowlistFs(inner, {
+    allowlist,
+    onWrite: options.onFileWrite,
+  });
 
   const bash = new Bash({
     fs,
