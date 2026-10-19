@@ -126,10 +126,13 @@ export async function runNotesAgent(
       },
     });
 
-    const result = await agent.generate({
-      prompt: options.prompt,
-      abortSignal: signal,
-    });
+    const result = await Promise.race([
+      agent.generate({
+        prompt: options.prompt,
+        abortSignal: signal,
+      }),
+      rejectOnAbort(signal),
+    ]);
 
     steps = result.steps.length;
     trackedUsage = result.totalUsage;
@@ -309,6 +312,18 @@ async function logStep(
   await log.log("step-finish", {
     step: stepIndex,
     usage: step.usage,
+  });
+}
+
+function rejectOnAbort(signal: AbortSignal): Promise<never> {
+  return new Promise((_, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    signal.addEventListener("abort", () => reject(signal.reason), {
+      once: true,
+    });
   });
 }
 

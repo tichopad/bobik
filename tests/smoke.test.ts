@@ -249,4 +249,26 @@ describe("smoke: agent against a notes directory", () => {
       25,
     );
   });
+
+  it("aborts a stalled run at the timeout", async () => {
+    root = await mkdtemp(join(tmpdir(), "bobik-smoke-"));
+    await mkdir(join(root, "daily-notes"), { recursive: true });
+
+    const model = new MockLanguageModelV3({
+      modelId: "mock-model",
+      doGenerate: () => new Promise(() => {}),
+    });
+
+    await assert.rejects(
+      runNotesAgent({
+        cwd: root,
+        promptPath: "prompt.md",
+        prompt: "Never finish.",
+        allowPath: "./daily-notes/**/*.md",
+        model,
+        timeoutMs: 20,
+      }),
+      /Run timed out after 20ms/,
+    );
+  });
 });
