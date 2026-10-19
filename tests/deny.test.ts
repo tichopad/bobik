@@ -4,6 +4,7 @@ import {
   createDenyPolicy,
   extractCommandNames,
   findDeniedCommand,
+  UNINSPECTABLE_COMMAND,
 } from "../src/deny.ts";
 
 function commands(script: string): string[] {
@@ -42,6 +43,58 @@ describe("extractCommandNames", () => {
   it("extracts commands from command substitutions", () => {
     assert.deepEqual(commands('echo "$(rm a.md)"'), ["echo", "rm"]);
     assert.deepEqual(commands("echo `rm a.md`"), ["echo", "rm"]);
+    assert.deepEqual(commands("$(rm a.md)"), ["rm"]);
+    assert.deepEqual(commands("echo ${X:-$(rm a.md)}"), ["echo", "rm"]);
+  });
+
+  it("extracts denied fallbacks from parameter-expanded command names", () => {
+    assert.deepEqual(commands("${CMD:-rm} a.md"), ["rm"]);
+    assert.deepEqual(commands("${CMD:=wget} example.com"), ["wget"]);
+    assert.deepEqual(commands("${CMD:-echo hi} a.md"), ["echo", "hi"]);
+  });
+
+  it("inspects nested shells and eval", () => {
+    assert.deepEqual(commands("bash -c 'rm a.md'"), ["bash", "rm"]);
+    assert.deepEqual(commands("bash -ec 'rm a.md'"), ["bash", "rm"]);
+    assert.deepEqual(commands("eval 'rm a.md'"), ["eval", "rm"]);
+    assert.deepEqual(commands("eval 'echo ok'"), ["eval", "echo"]);
+    assert.deepEqual(commands("trap 'rm a.md' EXIT"), ["trap", "rm"]);
+    assert.deepEqual(commands("trap -- 'rm a.md' EXIT"), ["trap", "rm"]);
+  });
+
+  it("inspects shell heredocs", () => {
+    assert.deepEqual(commands("sh <<'EOF'\nrm a.md\nEOF"), ["sh", "rm"]);
+  });
+
+  it("fails closed for shell scripts it cannot inspect", () => {
+    assert.deepEqual(commands("source evil.sh"), [
+      "source",
+      UNINSPECTABLE_COMMAND,
+    ]);
+    assert.deepEqual(commands(". evil.sh"), [".", UNINSPECTABLE_COMMAND]);
+    assert.deepEqual(commands("echo 'rm a.md' | bash"), [
+      "echo",
+      "bash",
+      UNINSPECTABLE_COMMAND,
+    ]);
+    assert.deepEqual(commands('eval "$CMD"'), ["eval", UNINSPECTABLE_COMMAND]);
+  });
+
+  it("extracts commands from find -exec", () => {
+    assert.deepEqual(commands("find . -name '*.md' -exec rm {} \\;"), [
+      "find",
+      "rm",
+    ]);
+    assert.deepEqual(commands("find . -name '*.md' -exec sh -c 'rm {}' \\;"), [
+      "find",
+      "sh",
+      "rm",
+    ]);
+    assert.deepEqual(commands("find . -name '*.md' -exec bash {} \\;"), [
+      "find",
+      "bash",
+      UNINSPECTABLE_COMMAND,
+    ]);
   });
 
   it("extracts commands from control flow bodies", () => {
@@ -114,6 +167,28 @@ describe("findDeniedCommand", () => {
   it("matches commands invoked through wrappers and xargs", () => {
     assert.equal(findDeniedCommand("command rm a.md", deny), "rm");
     assert.equal(findDeniedCommand("xargs -n1 rm", deny), "rm");
+  });
+
+  it("matches commands hidden in nested shells, eval, heredocs and find", () => {
+    assert.equal(findDeniedCommand("bash -c 'rm a.md'", deny), "rm");
+    assert.equal(findDeniedCommand("eval 'rm a.md'", deny), "rm");
+    assert.equal(findDeniedCommand("sh <<'EOF'\nrm a.md\nEOF", deny), "rm");
+    assert.equal(
+      findDeniedCommand("find . -name '*.md' -exec rm {} \\;", deny),
+      "rm",
+    );
+  });
+
+  it("fails closed when a shell script cannot be inspected", () => {
+    assert.equal(
+      findDeniedCommand("echo 'rm a.md' | bash", deny),
+      "nested shell script",
+    );
+    assert.equal(
+      findDeniedCommand("source evil.sh", deny),
+      "nested shell script",
+    );
+    assert.equal(findDeniedCommand("source evil.sh", new Set()), undefined);
   });
 
   it("matches absolute command paths by basename", () => {

@@ -10,6 +10,32 @@ import {
 } from "just-bash";
 
 /**
+ * Marker for a nested shell script the analyzer cannot inspect (for example
+ * `sh notes.sh` or `sh` reading a pipeline). When a deny list is active these
+ * forms fail closed instead of guessing what the script contains.
+ */
+export const UNINSPECTABLE_COMMAND = "<nested-script>";
+
+const UNINSPECTABLE_LABEL = "nested shell script";
+
+/** Shell interpreters that can execute another script. */
+const SHELL_COMMANDS: ReadonlySet<string> = new Set([
+  "bash",
+  "sh",
+  "dash",
+  "zsh",
+  "ksh",
+]);
+
+/** `find` primaries that run a command for each match. */
+const FIND_EXEC_OPTIONS: ReadonlySet<string> = new Set([
+  "-exec",
+  "-execdir",
+  "-ok",
+  "-okdir",
+]);
+
+/**
  * The deny policy for bash commands. The interface is deliberately small: a
  * caller hands in the configured command names and asks whether a script uses
  * one of them.
@@ -46,7 +72,14 @@ export function findDeniedCommand(
   script: string,
   deny: ReadonlySet<string>,
 ): string | undefined {
+  if (deny.size === 0) {
+    return undefined;
+  }
+
   for (const name of extractCommandNames(script)) {
+    if (name === UNINSPECTABLE_COMMAND) {
+      return UNINSPECTABLE_LABEL;
+    }
     const normalized = normalizeCommandName(name);
     if (deny.has(name)) {
       return name;
@@ -152,9 +185,15 @@ function walkStatements(statements: StatementNode[], names: string[]): void {
 }
 
 function walkSimpleCommand(command: SimpleCommandNode, names: string[]): void {
+  if (command.name) {
+    walkWord(command.name, names);
+  }
+
   const name = literalWord(command.name);
   if (name) {
-    recordInvocation(name, command.args, names, 0);
+    recordInvocation(name, command.args, names, 0, command.redirections);
+  } else if (command.name) {
+    recordNameCandidates(command.name, names);
   }
 
   for (const word of command.args) {
@@ -191,6 +230,11 @@ function walkWordParts(parts: WordNode["parts"], names: string[]): void {
       case "DoubleQuoted":
         walkWordParts(part.parts, names);
         break;
+      case "ParameterExpansion":
+        if (part.operation) {
+          walkParameterOperation(part.operation, names);
+        }
+        break;
       case "BraceExpansion":
         for (const item of part.items) {
           if (item.type === "Word") {
@@ -199,6 +243,96 @@ function walkWordParts(parts: WordNode["parts"], names: string[]): void {
         }
         break;
     }
+  }
+}
+
+type ParameterExpansionPart = Extract<
+  WordNode["parts"][number],
+  { type: "ParameterExpansion" }
+>;
+type ParameterOperation = NonNullable<ParameterExpansionPart["operation"]>;
+
+function walkParameterOperation(
+  operation: ParameterOperation,
+  names: string[],
+): void {
+  switch (operation.type) {
+    case "DefaultValue":
+    case "AssignDefault":
+    case "UseAlternative":
+      walkWord(operation.word, names);
+      return;
+    case "ErrorIfUnset":
+      if (operation.word) {
+        walkWord(operation.word, names);
+      }
+      return;
+    case "PatternRemoval":
+      walkWord(operation.pattern, names);
+      return;
+    case "PatternReplacement":
+      walkWord(operation.pattern, names);
+      if (operation.replacement) {
+        walkWord(operation.replacement, names);
+      }
+      return;
+    case "CaseModification":
+      if (operation.pattern) {
+        walkWord(operation.pattern, names);
+      }
+      return;
+    case "Indirection":
+      if (operation.innerOp) {
+        walkParameterOperation(operation.innerOp, names);
+      }
+      return;
+  }
+}
+
+/**
+ * A command name built from parameter expansion, such as `${CMD:-rm}`, has
+ * several possible values. Collect literal defaults as conservative candidates
+ * so a denied fallback command is still caught.
+ */
+function recordNameCandidates(word: WordNode, names: string[]): void {
+  for (const part of word.parts) {
+    if (part.type !== "ParameterExpansion" || !part.operation) {
+      continue;
+    }
+    for (const candidate of operationWords(part.operation)) {
+      const literal = literalWord(candidate);
+      if (literal === undefined) {
+        continue;
+      }
+      for (const token of literal.trim().split(/\s+/)) {
+        if (token) {
+          names.push(token);
+        }
+      }
+    }
+  }
+}
+
+function operationWords(operation: ParameterOperation): WordNode[] {
+  switch (operation.type) {
+    case "DefaultValue":
+    case "AssignDefault":
+    case "UseAlternative":
+      return [operation.word];
+    case "ErrorIfUnset":
+      return operation.word ? [operation.word] : [];
+    case "PatternRemoval":
+      return [operation.pattern];
+    case "PatternReplacement":
+      return operation.replacement
+        ? [operation.pattern, operation.replacement]
+        : [operation.pattern];
+    case "CaseModification":
+      return operation.pattern ? [operation.pattern] : [];
+    case "Indirection":
+      return operation.innerOp ? operationWords(operation.innerOp) : [];
+    default:
+      return [];
   }
 }
 
@@ -328,6 +462,7 @@ function recordInvocation(
   args: WordNode[],
   names: string[],
   depth: number,
+  redirections: SimpleCommandNode["redirections"] = [],
 ): void {
   if (depth > 8) {
     return;
@@ -335,6 +470,33 @@ function recordInvocation(
   names.push(name);
 
   const command = basename(name);
+
+  if (command === "eval") {
+    recordEval(args, names);
+    return;
+  }
+
+  if (command === "trap") {
+    recordTrap(args, names);
+    return;
+  }
+
+  if (command === "source" || command === ".") {
+    // The target script may live on disk; inspecting it synchronously is not
+    // possible here, so a configured deny list fails closed.
+    names.push(UNINSPECTABLE_COMMAND);
+    return;
+  }
+
+  if (SHELL_COMMANDS.has(command)) {
+    recordShell(args, redirections, names);
+    return;
+  }
+
+  if (command === "find") {
+    recordFindExec(args, names, depth);
+    return;
+  }
 
   if (command === "timeout") {
     const duration = firstOrdinaryArgument(args, TIMEOUT_OPTIONS_WITH_VALUES);
@@ -368,6 +530,177 @@ function recordInvocation(
     if (inner) {
       recordInvocation(inner.name, inner.rest, names, depth + 1);
     }
+  }
+}
+
+/**
+ * Nested scripts are parsed recursively. The counter is module-level because
+ * extraction is synchronous; it prevents adversarial nesting from exhausting
+ * the stack.
+ */
+let nestedScriptDepth = 0;
+
+function walkNestedScript(script: string, names: string[]): void {
+  if (nestedScriptDepth >= 8) {
+    names.push(UNINSPECTABLE_COMMAND);
+    return;
+  }
+
+  nestedScriptDepth += 1;
+  try {
+    let ast: ScriptNode;
+    try {
+      ast = parse(script);
+    } catch {
+      names.push(UNINSPECTABLE_COMMAND);
+      return;
+    }
+    walkScript(ast, names);
+  } finally {
+    nestedScriptDepth -= 1;
+  }
+}
+
+function recordEval(args: WordNode[], names: string[]): void {
+  if (args.length === 0) {
+    return;
+  }
+
+  const parts = args.map((arg) => literalWord(arg));
+  if (parts.some((part) => part === undefined)) {
+    names.push(UNINSPECTABLE_COMMAND);
+    return;
+  }
+  walkNestedScript(parts.join(" "), names);
+}
+
+function recordTrap(args: WordNode[], names: string[]): void {
+  for (const arg of args) {
+    const value = literalWord(arg);
+    if (value === undefined) {
+      names.push(UNINSPECTABLE_COMMAND);
+      return;
+    }
+    if (value === "--") {
+      continue;
+    }
+    if (value.startsWith("-")) {
+      // -p / -l list traps; they do not execute anything.
+      return;
+    }
+    if (value === "" || value === "-") {
+      return;
+    }
+    walkNestedScript(value, names);
+    return;
+  }
+}
+
+function recordShell(
+  args: WordNode[],
+  redirections: SimpleCommandNode["redirections"],
+  names: string[],
+): void {
+  for (let index = 0; index < args.length; index += 1) {
+    const value = literalWord(args[index]);
+    if (value === undefined || !value.startsWith("-")) {
+      continue;
+    }
+    if (value.startsWith("--")) {
+      continue;
+    }
+
+    const commandFlag = value.indexOf("c");
+    if (commandFlag === -1) {
+      continue;
+    }
+
+    const attached = value.slice(commandFlag + 1);
+    if (attached) {
+      walkNestedScript(attached, names);
+      return;
+    }
+
+    const scriptWord = args[index + 1];
+    if (!scriptWord) {
+      names.push(UNINSPECTABLE_COMMAND);
+      return;
+    }
+    const script = literalWord(scriptWord);
+    if (script === undefined) {
+      names.push(UNINSPECTABLE_COMMAND);
+      return;
+    }
+    walkNestedScript(script, names);
+    return;
+  }
+
+  // Without -c, a shell runs a file or reads stdin. A heredoc is inspectable;
+  // everything else fails closed because the script content is not in the AST.
+  const hasUninspectableArgument = args.some((arg) => {
+    const value = literalWord(arg);
+    return value === undefined || (!value.startsWith("-") && value !== "--");
+  });
+  if (hasUninspectableArgument) {
+    names.push(UNINSPECTABLE_COMMAND);
+    return;
+  }
+
+  let inspected = false;
+  for (const redirection of redirections) {
+    if (
+      redirection.operator !== "<<" &&
+      redirection.operator !== "<<-" &&
+      redirection.operator !== "<<<"
+    ) {
+      continue;
+    }
+    inspected = true;
+    const content =
+      redirection.target.type === "HereDoc"
+        ? literalWord(redirection.target.content)
+        : literalWord(redirection.target);
+    if (content === undefined) {
+      names.push(UNINSPECTABLE_COMMAND);
+      return;
+    }
+    walkNestedScript(content, names);
+  }
+
+  if (!inspected) {
+    names.push(UNINSPECTABLE_COMMAND);
+  }
+}
+
+function recordFindExec(
+  args: WordNode[],
+  names: string[],
+  depth: number,
+): void {
+  for (let index = 0; index < args.length; index += 1) {
+    const value = literalWord(args[index]);
+    if (value === undefined || !FIND_EXEC_OPTIONS.has(value)) {
+      continue;
+    }
+
+    const commandArgs: WordNode[] = [];
+    let cursor = index + 1;
+    for (; cursor < args.length; cursor += 1) {
+      const terminator = literalWord(args[cursor]);
+      if (terminator === ";" || terminator === "+") {
+        break;
+      }
+      const argument = args[cursor];
+      if (argument) {
+        commandArgs.push(argument);
+      }
+    }
+
+    const inner = firstOrdinaryArgument(commandArgs, undefined);
+    if (inner) {
+      recordInvocation(inner.name, inner.rest, names, depth + 1);
+    }
+    index = cursor;
   }
 }
 
