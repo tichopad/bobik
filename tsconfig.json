@@ -7,6 +7,7 @@
     "module": "nodenext",
     "target": "esnext",
     "skipLibCheck": true,
+    "allowImportingTsExtensions": true,
     "types": ["node"]
   },
   "include": ["src/**/*.ts", "tests/**/*.ts", "eslint.config.ts"]
