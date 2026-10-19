@@ -83,11 +83,7 @@ Exit codes:
 
 ```cron
 # Every day at 07:15, carry yesterday's unfinished TODOs into today's note.
-15 7 * * * cd /home/me/notes && /usr/local/bin/bobik \
-  --prompt /home/me/.config/bobik/daily-notes.md \
-  --allow-path "./daily-notes/**/*.md" \
-  --deny "rm,wget" \
-  >> /home/me/.local/state/bobik-cron.log 2>&1
+15 7 * * * cd /home/me/notes && /usr/local/bin/bobik --prompt /home/me/.config/bobik/daily-notes.md --allow-path "./daily-notes/**/*.md" --deny "rm,wget" >> /home/me/.local/state/bobik-cron.log 2>&1
 ```
 
 Use absolute paths in CRON. The run summary and any errors land in the log
