@@ -47,6 +47,9 @@ const DEVICE_PATHS: ReadonlySet<string> = new Set([
   "/dev/stderr",
 ]);
 
+/** The host-written audit directory is never visible inside the sandbox. */
+const PROTECTED_DIRECTORY = "/.agent-bobik";
+
 /**
  * A filesystem wrapper that enforces an allowlist glob.
  *
@@ -131,6 +134,9 @@ export class AllowlistFs implements IFileSystem {
     if (DEVICE_PATHS.has(target)) {
       return true;
     }
+    if (this.isProtected(target)) {
+      return false;
+    }
 
     if (this.allowlist.matches(target)) {
       return this.inner.exists(target);
@@ -192,6 +198,9 @@ export class AllowlistFs implements IFileSystem {
       return;
     }
     const target = this.normalize(path);
+    if (this.isProtected(target)) {
+      throw denied(path, "remove");
+    }
     let info: FsStat;
     try {
       info = await this.inner.lstat(target);
@@ -268,7 +277,11 @@ export class AllowlistFs implements IFileSystem {
   getAllPaths(): string[] {
     const allowed = this.inner.getAllPaths().filter((path) => {
       const target = this.tryNormalize(path);
-      return target !== undefined && this.allowlist.matches(target);
+      return (
+        target !== undefined &&
+        !this.isProtected(target) &&
+        this.allowlist.matches(target)
+      );
     });
     return [...DEVICE_PATHS, ...allowed];
   }
@@ -303,8 +316,8 @@ export class AllowlistFs implements IFileSystem {
     }
     const target = this.normalize(path);
     if (
-      !this.allowlist.matches(target) &&
-      !this.allowlist.isTraversable(target)
+      this.isProtected(target) ||
+      (!this.allowlist.matches(target) && !this.allowlist.isTraversable(target))
     ) {
       throw denied(path, "realpath");
     }
@@ -324,6 +337,9 @@ export class AllowlistFs implements IFileSystem {
 
     return entries.filter((entry) => {
       const child = posix.join(directory, entry.name);
+      if (this.isProtected(child)) {
+        return false;
+      }
       if (this.allowlist.matches(child)) {
         return true;
       }
@@ -367,8 +383,8 @@ export class AllowlistFs implements IFileSystem {
   private requirePolicyCandidate(path: string, operation: string): string {
     const target = this.normalize(path);
     if (
-      !this.allowlist.matches(target) &&
-      !this.allowlist.isTraversable(target)
+      this.isProtected(target) ||
+      (!this.allowlist.matches(target) && !this.allowlist.isTraversable(target))
     ) {
       throw denied(path, operation);
     }
@@ -390,9 +406,15 @@ export class AllowlistFs implements IFileSystem {
   }
 
   private async assertTreeMatches(directory: string): Promise<void> {
+    if (this.isProtected(directory)) {
+      throw denied(directory, "remove");
+    }
     const entries = await this.listWithTypes(directory);
     for (const entry of entries) {
       const child = posix.join(directory, entry.name);
+      if (this.isProtected(child)) {
+        throw denied(child, "remove");
+      }
       if (entry.isDirectory) {
         if (!this.allowlist.isTraversable(child)) {
           throw denied(child, "remove");
@@ -410,10 +432,19 @@ export class AllowlistFs implements IFileSystem {
     source: string,
     target: string,
   ): Promise<void> {
+    if (this.isProtected(source) || this.isProtected(target)) {
+      throw denied(this.isProtected(source) ? source : target, "cp");
+    }
     const entries = await this.listWithTypes(source);
     for (const entry of entries) {
       const childSource = posix.join(source, entry.name);
       const childTarget = posix.join(target, entry.name);
+      if (this.isProtected(childSource) || this.isProtected(childTarget)) {
+        throw denied(
+          this.isProtected(childSource) ? childSource : childTarget,
+          "cp",
+        );
+      }
       if (entry.isDirectory) {
         if (!this.allowlist.isTraversable(childTarget)) {
           throw denied(childTarget, "cp");
@@ -435,7 +466,7 @@ export class AllowlistFs implements IFileSystem {
 
   private requireFile(path: string, operation: string): string {
     const target = this.normalize(path);
-    if (!this.allowlist.matches(target)) {
+    if (this.isProtected(target) || !this.allowlist.matches(target)) {
       throw denied(path, operation);
     }
     return target;
@@ -450,10 +481,16 @@ export class AllowlistFs implements IFileSystem {
 
   private requireTraversable(path: string, operation: string): string {
     const target = this.normalize(path);
-    if (!this.allowlist.isTraversable(target)) {
+    if (this.isProtected(target) || !this.allowlist.isTraversable(target)) {
       throw denied(path, operation);
     }
     return target;
+  }
+
+  private isProtected(path: string): boolean {
+    return (
+      path === PROTECTED_DIRECTORY || path.startsWith(`${PROTECTED_DIRECTORY}/`)
+    );
   }
 
   private normalize(path: string): string {

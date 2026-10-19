@@ -290,6 +290,9 @@ async function logStep(
           toolName: part.toolName,
           toolCallId: part.toolCallId,
           output: part.output,
+          ...(part.toolName === "writeFile" && isRecord(part.input)
+            ? { input: part.input }
+            : {}),
         });
         break;
       case "tool-error":

@@ -114,8 +114,9 @@ Bobik assumes the prompt is trusted and the model's output is not.
   command substitutions, `xargs` targets, and common wrappers such as `command`,
   `env`, `sudo`, and `timeout`. A denied command is replaced with an error that
   exits `126`, which the agent sees.
-- **Audit directory.** Logs live in `.agent-bobik/`. With `dot: false` and the
-  allowlist wrapper, the sandboxed agent cannot read or list that directory.
+- **Audit directory.** Logs live in `.agent-bobik/`. The wrapper hard-denies
+  that directory (and everything under it) even if the allow-path glob names it,
+  so the sandboxed agent cannot read or list the logs.
 - **Guardrails.** The agent loop stops after 25 steps, each bash command is
   limited to 30 seconds, and the whole run is limited to 5 minutes.
 

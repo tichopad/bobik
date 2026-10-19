@@ -263,4 +263,18 @@ describe("AllowlistFs", () => {
     assert.equal(await fs.exists("/dev/null"), true);
     assert.equal((await fs.stat("/dev/null")).isFile, true);
   });
+
+  it("always hides the audit directory, even when the glob targets it", async () => {
+    const logFs = new AllowlistFs(fixture.inner, {
+      allowlist: compileAllowlist(fixture.root, ".agent-bobik/**/*.jsonl"),
+    });
+
+    await rejectedWithEacces(logFs.readFile("/.agent-bobik/run.jsonl"));
+    await rejectedWithEacces(logFs.readdir("/.agent-bobik"));
+    assert.deepEqual(await logFs.readdir("/"), []);
+    assert.equal(
+      logFs.getAllPaths().includes("/.agent-bobik/run.jsonl"),
+      false,
+    );
+  });
 });
