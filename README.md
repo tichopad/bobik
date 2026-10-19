@@ -103,7 +103,8 @@ Bobik assumes the prompt is trusted and the model's output is not.
   delete, mkdir, rename, stat, copy, and directory listing — against
   `--allow-path` using picomatch with `dot: false`. Non-matching paths fail with
   `EACCES`. Dotfiles and dot-directories never match unless the glob explicitly
-  targets them.
+  targets them. Inside the sandbox, `/` is the working directory, so shell paths
+  are virtual and cannot reach the host filesystem outside cwd.
 - **One enforcement point.** The same wrapped filesystem backs all three tools:
   `bash`, `readFile`, and `writeFile`.
 - **No network.** The sandbox does not configure networking, so `curl` and

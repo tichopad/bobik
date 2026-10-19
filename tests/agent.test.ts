@@ -32,6 +32,7 @@ describe("buildSystemPrompt", () => {
     assert.match(prompt, /Monday, October 19, 2026 at 19:55:00 GMT\+2/);
     assert.match(prompt, /Europe\/Prague/);
     assert.match(prompt, /Working directory: \/notes/);
+    assert.match(prompt, /Sandbox root: \//);
     assert.match(prompt, /\.\/daily-notes\/\*\*\/\*\.md/);
     assert.match(prompt, /EACCES/);
   });

@@ -189,6 +189,7 @@ export function buildSystemPrompt(options: SystemPromptOptions): string {
     `Current local date/time: ${formatLocalDateTime(now, timeZone)}`,
     `Timezone: ${timeZone}`,
     `Working directory: ${options.cwd}`,
+    "Sandbox root: / (inside bash this is the same directory; use relative paths)",
     `Allowed file glob: ${options.allowPath}`,
     "",
     "You may only read, create, edit, or delete files whose paths match the allowed glob. Attempts outside it fail with EACCES. Dotfiles and dot-directories are hidden unless the glob explicitly targets them; the .agent-bobik audit directory is never available to you.",
