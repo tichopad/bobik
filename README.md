@@ -11,7 +11,7 @@ $ bobik --prompt examples/daily-notes.md --allow-path "./daily-notes/**/*.md" --
 ```
 
 The final assistant message goes to **stdout**. A one-line summary (steps,
-files written, token usage, log path) goes to **stderr**.
+files written through any tool, token usage, log path) goes to **stderr**.
 
 ## Requirements
 
@@ -22,15 +22,17 @@ files written, token usage, log path) goes to **stderr**.
 ## Install
 
 ```console
-# From this repository, globally:
+# From this repository (install dependencies first, then link the executable):
+pnpm install
 pnpm install -g .
 
 # Or run the published package without installing:
 pnpx bobik --prompt ./prompt.md --allow-path "./notes/**/*.md"
 ```
 
-The package exposes a `bobik` executable that points straight at the
-TypeScript entry point.
+The package exposes a `bobik` executable through a small launcher that enables
+Node's native type stripping for the TypeScript source. There is still no build
+step.
 
 ## API key
 
@@ -83,11 +85,13 @@ Exit codes:
 
 ```cron
 # Every day at 07:15, carry yesterday's unfinished TODOs into today's note.
-15 7 * * * cd /home/me/notes && /usr/local/bin/bobik --prompt /home/me/.config/bobik/daily-notes.md --allow-path "./daily-notes/**/*.md" --deny "rm,wget" >> /home/me/.local/state/bobik-cron.log 2>&1
+15 7 * * * cd /home/me/notes && "$(command -v bobik)" --prompt /home/me/.config/bobik/daily-notes.md --allow-path "./daily-notes/**/*.md" --deny "rm,wget" >> /home/me/.local/state/bobik-cron.log 2>&1
 ```
 
-Use absolute paths in CRON. The run summary and any errors land in the log
-file; the agent's final answer is also appended to stdout.
+Use absolute paths in CRON. `command -v bobik` must resolve in cron's `PATH`;
+otherwise replace it with the absolute path reported by `command -v bobik` in
+your shell (often `$(pnpm bin -g)/bobik`). The run summary and any errors land
+in the log file; the agent's final answer is also appended to stdout.
 
 ## Security model
 
@@ -96,30 +100,36 @@ Bobik assumes the prompt is trusted and the model's output is not.
 - **Allowlist filesystem.** A `just-bash` `ReadWriteFs` is rooted at the
   current working directory with `allowSymlinks: false`. It is wrapped by an
   allowlist filesystem that checks every path operation — read, write, append,
-  delete, mkdir, rename, stat, copy, and directory listing — against
-  `--allow-path` using picomatch with `dot: false`. Non-matching paths fail with
-  `EACCES`. Dotfiles and dot-directories never match unless the glob explicitly
-  targets them. Inside the sandbox, `/` is the working directory, so shell paths
-  are virtual and cannot reach the host filesystem outside cwd.
+  delete, mkdir, rename, stat, copy, and directory listing. File contents may
+  only be read, written, or deleted when the path matches `--allow-path` using
+  picomatch with `dot: false`. Directories on the way to a match, including the
+  root, remain traversable so the agent can navigate; listings hide
+  non-matching entries. Non-matching file operations fail with `EACCES`.
+  Dotfiles and dot-directories never match unless the glob explicitly targets
+  them. Inside the sandbox, `/` is the working directory, so shell paths are
+  virtual and cannot reach the host filesystem outside cwd.
 - **One enforcement point.** The same wrapped filesystem backs all three tools:
   `bash`, `readFile`, and `writeFile`.
 - **No network.** The sandbox does not configure networking, so `curl` and
   `wget` do not exist.
 - **Deny list.** In `onBeforeBashCall`, the command is parsed with just-bash's
   AST, and every command name is checked, including pipeline stages, subshells,
-  command substitutions, `xargs` targets, and common wrappers such as `command`,
-  `env`, `sudo`, and `timeout`. A denied command is replaced with an error that
-  exits `126`, which the agent sees.
+  command substitutions, parameter-expansion fallbacks, `xargs` targets,
+  `find -exec`, nested `bash`/`sh -c`, `eval`/`trap` payloads, heredocs, and
+  common wrappers such as `command`, `env`, `sudo`, and `timeout`. A denied command is
+  replaced with an error that exits `126`, which the agent sees. Shell scripts
+  the analyzer cannot see into (`source file.sh`, a script file argument, or a
+  shell reading a pipeline) fail closed while a deny list is configured.
 - **Audit directory.** Logs live in `.agent-bobik/`. The wrapper hard-denies
   that directory (and everything under it) even if the allow-path glob names it,
   so the sandboxed agent cannot read or list the logs.
 - **Guardrails.** The agent loop stops after 25 steps, each bash command is
   limited to 30 seconds, and the whole run is limited to 5 minutes.
 
-The deny list is defense in depth, not the write boundary. It intentionally does
-not catch commands hidden inside `find -delete`, `sed -i`, `sh -c`, or shell
-redirection tricks. The filesystem wrapper is what actually prevents writes
-outside `--allow-path`.
+The deny list is defense in depth, not the write boundary. It intentionally
+does not catch commands hidden inside `find -delete`, `sed -i`, dynamically
+constructed command names such as `$CMD`, or shell redirection tricks. The
+filesystem wrapper is what actually prevents writes outside `--allow-path`.
 
 ## Audit log
 

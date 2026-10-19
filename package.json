@@ -4,9 +4,10 @@
   "description": "A single-purpose CLI AI agent for Markdown notes",
   "type": "module",
   "bin": {
-    "bobik": "./src/cli.ts"
+    "bobik": "./bin/bobik.mjs"
   },
   "files": [
+    "bin",
     "src",
     "examples",
     "README.md"
