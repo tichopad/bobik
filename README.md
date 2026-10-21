@@ -53,16 +53,17 @@ run `bobik set-api-key`.
 ## Usage
 
 ```console
-bobik --prompt <path> --allow-path <glob> [--deny "rm,wget"] [--model <id>]
+bobik --prompt <path> --allow-path <glob> [--deny "rm,wget"] [--model <id>] [--vision-model <id>]
 bobik set-api-key <key>
 ```
 
-| Flag                  | Required | Description                                                                                                                            |
-| --------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `--prompt <path>`     | yes      | Markdown file with task instructions. Read by the host process, so it may live anywhere.                                               |
-| `--allow-path <glob>` | yes      | Only files matching this glob (resolved relative to the current directory) may be read or written. Example: `"./daily-notes/**/*.md"`. |
-| `--deny <list>`       | no       | Comma-separated bash command names to block, e.g. `"rm,wget"`.                                                                         |
-| `--model <id>`        | no       | Fireworks model ID. Default: `accounts/fireworks/models/deepseek-v4p1-flash-1017`.                                                     |
+| Flag                  | Required | Description                                                                                                                                                |
+| --------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--prompt <path>`     | yes      | Markdown file with task instructions. Read by the host process, so it may live anywhere.                                                                   |
+| `--allow-path <glob>` | yes      | Only files matching this glob (resolved relative to the current directory) may be read or written. Example: `"./daily-notes/**/*.md"`.                     |
+| `--deny <list>`       | no       | Comma-separated bash command names to block, e.g. `"rm,wget"`.                                                                                             |
+| `--model <id>`        | no       | Fireworks model ID. Default: `accounts/fireworks/models/deepseek-v4p1-flash-1017`.                                                                         |
+| `--vision-model <id>` | no       | Fireworks model ID for image inspection, using the same API key. Defaults to the exact `--model` selection; no automatic fallback or capability preflight. |
 
 Example:
 
@@ -77,9 +78,46 @@ bobik \
 Exit codes:
 
 - `0` — success, including when the agent decides there is nothing to do.
-- `1` — runtime error (API failure, timeout, step limit, tool failure).
+- `1` — runtime error (API failure, timeout, step limit, uncaught tool failure).
 - `2` — usage error (missing/invalid flags, allow-path escapes cwd, prompt file
   missing, no API key).
+
+Tool errors are recoverable: an unsuccessful inspection alone does not force a
+nonzero exit. The agent must report unresolved or incomplete inspections in its
+final answer.
+
+## Image inspection
+
+The always-available `viewMedia({path, prompt?})` tool returns **plain text only**
+to the notes agent. It accepts local PNG, JPEG, WebP, and GIF files up to **10 MiB**,
+checks the format from the bytes rather than the extension, and sends the original
+bytes without resizing or cropping. URLs, SVG, PDF, audio, and video are not supported.
+Animation frame support varies by provider; a description does not guarantee that
+every frame was analyzed.
+
+Include images in the allow-path explicitly; a link in a Markdown note grants no
+access. For example (replace the model placeholder with a Fireworks image-capable ID):
+
+```console
+bobik --prompt ./prompt.md \
+  --allow-path './notes/**/*.{md,png,jpg,jpeg,webp,gif}' \
+  --vision-model '<Fireworks-image-capable-model-id>'
+```
+
+Each inspection is a single, tool-free model request containing only the image,
+the supplied prompt (default: describe the image and transcribe visible text), and
+fixed faithful-analysis/uncertainty instructions. Outer task instructions and history
+are not included. Image-embedded instructions and returned media-derived instructions
+are data, not commands. Model/image failures are tool errors with a hint to set
+`--vision-model`; Bobik never silently chooses another model. Empty/refused responses
+are failures; output-limit responses carry a prominent incomplete warning. There is
+no Bobik-specific output cap.
+
+Vision requests share the run's five-minute timeout and caller cancellation; the
+25-step limit counts only the outer loop. Their token usage is included in the run
+summary and audit totals (including known usage on failures). An aborted/failed
+provider request may not report usage. Programmatic callers can inject an optional
+AI SDK `LanguageModel` as `visionModel`; omitting it reuses the exact `model` instance.
 
 ## CRON example
 
@@ -108,8 +146,10 @@ Bobik assumes the prompt is trusted and the model's output is not.
   Dotfiles and dot-directories never match unless the glob explicitly targets
   them. Inside the sandbox, `/` is the working directory, so shell paths are
   virtual and cannot reach the host filesystem outside cwd.
-- **One enforcement point.** The same wrapped filesystem backs all three tools:
-  `bash`, `readFile`, and `writeFile`.
+- **One enforcement point.** The same wrapped filesystem backs all four tools:
+  `bash`, `readFile`, `writeFile`, and `viewMedia`. Image reads inherit the same
+  virtual paths, allowlist, hidden-file rules, audit-directory protection, and
+  symlink safeguards; they never open agent-selected host paths directly.
 - **No network.** The sandbox does not configure networking, so `curl` and
   `wget` do not exist.
 - **Deny list.** In `onBeforeBashCall`, the command is parsed with just-bash's
@@ -151,8 +191,16 @@ never truncated:
 ```
 
 Event types: `run-start`, `tool-call`, `tool-result`, `assistant-text`,
-`step-finish`, and `run-end`. Tool arguments and outputs, including full file
-contents, are recorded as-is so a run can be replayed from the log.
+`step-finish`, `vision-inspection`, and `run-end`. Tool arguments and outputs,
+including full note contents, are recorded as-is. `run-start` records both model
+identities. `vision-inspection` records the outer tool-call ID, path, detected MIME,
+byte count, SHA256, effective prompt, selected model, full returned text, status,
+and known token usage (metadata unavailable before a validation failure is omitted).
+Raw/base64 image bytes and raw provider errors are **not** logged. Image replay
+therefore requires the original files matching the recorded SHA256, not just the log.
+`step-finish` usage is outer-only; vision events contain nested usage. `run-end`
+records separate `outerUsage` and `visionUsage` plus their combined `totalUsage`;
+do not add the aggregate to its components.
 
 ## Development
 

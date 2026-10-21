@@ -125,6 +125,7 @@ describe("cli", () => {
     assert.equal(result.code, 0);
     assert.match(result.stdout, /Usage:/);
     assert.match(result.stdout, /--allow-path/);
+    assert.match(result.stdout, /--vision-model/);
     assert.match(result.stdout, /set-api-key/);
   });
 
@@ -152,6 +153,18 @@ describe("cli", () => {
   });
 
   it("exits 2 when a flag is missing its value", async () => {
+    for (const value of [undefined, "", "   "]) {
+      const vision = await runCli([
+        "--prompt",
+        "prompt.md",
+        "--allow-path",
+        "./notes/**/*.md",
+        "--vision-model",
+        ...(value === undefined ? [] : [value]),
+      ]);
+      assert.equal(vision.code, 2);
+      assert.match(vision.stderr, /--vision-model requires a value/);
+    }
     const model = await runCli([
       "--prompt",
       "prompt.md",
@@ -243,6 +256,49 @@ describe("cli", () => {
         .split("\n")[0] ?? "",
     ) as { type: string };
     assert.equal(logEvent.type, "run-start");
+  });
+
+  it("records the selected Fireworks vision model and defaults it to the exact agent model", async () => {
+    root = await mkdtemp(join(tmpdir(), "bobik-cli-"));
+    await writeFile(join(root, "prompt.md"), "Inspect images.");
+    for (const explicit of [false, true]) {
+      const result = await runCli(
+        [
+          "--prompt",
+          "prompt.md",
+          "--allow-path",
+          "../**/*",
+          "--model",
+          "accounts/test/models/outer",
+          ...(explicit
+            ? ["--vision-model", "accounts/test/models/vision"]
+            : []),
+        ],
+        { cwd: root, env: { ...process.env, FIREWORKS_API_KEY: "test-key" } },
+      );
+      assert.equal(result.code, 2);
+    }
+    const logs = await readdir(join(root, ".agent-bobik"));
+    const selections = await Promise.all(
+      logs.map(async (name) => {
+        const first = (
+          await readFile(join(root!, ".agent-bobik", name), "utf8")
+        ).split("\n")[0]!;
+        return (
+          JSON.parse(first) as { flags: { model: string; visionModel: string } }
+        ).flags;
+      }),
+    );
+    assert.deepEqual(
+      selections.map((flags) => flags.model),
+      Array(2).fill("accounts/test/models/outer"),
+    );
+    assert.deepEqual(selections.map((flags) => flags.visionModel).sort(), [
+      "accounts/test/models/outer",
+      "accounts/test/models/vision",
+    ]);
+    const help = await runCli(["run", "--help"]);
+    assert.match(help.stdout, /--vision-model/);
   });
 
   it("saves the API key to the XDG config with mode 0o600", async () => {

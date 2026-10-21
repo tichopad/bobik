@@ -152,6 +152,7 @@ describe("smoke: agent against a notes directory", () => {
       allowPath: "./daily-notes/**/*.md",
       deny: ["rm"],
       model: "mock-model",
+      visionModel: "mock-model",
     });
     assert.equal(events[0]?.timeZone, "Europe/Prague");
     assert.match(String(events[0]?.localDateTime), /19:55:00/);

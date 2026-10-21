@@ -29,15 +29,16 @@ entry: `bin: { "bobik": "./src/cli.ts" }` with a `#!/usr/bin/env node` shebang.
 ### Default command: run the agent
 
 ```
-bobik --prompt <path> --allow-path <glob> [--deny "rm,wget"] [--model <id>]
+bobik --prompt <path> --allow-path <glob> [--deny "rm,wget"] [--model <id>] [--vision-model <id>]
 ```
 
-| Flag | Required | Description |
-| --- | --- | --- |
-| `--prompt <path>` | yes | Path to a Markdown file with the user's task instructions. Read by the **host process** at startup (it is NOT subject to sandbox restrictions and may live anywhere). |
-| `--allow-path <glob>` | yes | Glob (resolved relative to cwd) defining the only files the agent may read/write. E.g. `"./daily-notes/**/*.md"`. |
-| `--deny <list>` | no | Comma-separated bash command names to block, e.g. `"rm,wget"`. Entries are literal command names matched against AST-extracted commands. |
-| `--model <id>` | no | Fireworks model ID. Default: `accounts/fireworks/models/deepseek-v4p1-flash-1017`. |
+| Flag                  | Required | Description                                                                                                                                                           |
+| --------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--prompt <path>`     | yes      | Path to a Markdown file with the user's task instructions. Read by the **host process** at startup (it is NOT subject to sandbox restrictions and may live anywhere). |
+| `--allow-path <glob>` | yes      | Glob (resolved relative to cwd) defining the only files the agent may read/write. E.g. `"./daily-notes/**/*.md"`.                                                     |
+| `--deny <list>`       | no       | Comma-separated bash command names to block, e.g. `"rm,wget"`. Entries are literal command names matched against AST-extracted commands.                              |
+| `--model <id>`        | no       | Fireworks model ID. Default: `accounts/fireworks/models/deepseek-v4p1-flash-1017`.                                                                                    |
+| `--vision-model <id>` | no       | Fireworks image-inspection model, using the same provider and credentials. Defaults to the exact agent model. No fallback, model registry, or capability preflight.   |
 
 ### Subcommand: set API key
 
@@ -50,8 +51,11 @@ Writes `{ "apiKey": "<key>" }` to the global config file (see below).
 ### Exit codes
 
 - `0` — success, **including** "agent decided there was nothing to do".
-- `1` — runtime error (API failure, timeout, step limit reached, tool failure).
+- `1` — runtime error (API failure, timeout, step limit reached, uncaught tool failure).
 - `2` — usage error (missing/invalid flags, glob escapes cwd, prompt file missing, no API key).
+
+Tool errors, including failed image inspections, are recoverable and alone do not
+force exit 1. The final answer must disclose unresolved/incomplete inspections.
 
 ### Output
 
@@ -81,13 +85,13 @@ There is **no `.env` support** — the config file / env var are the only source
   (`dot: false`, so dotfiles/dot-dirs like `.agent-bobik/` never match unless the glob
   explicitly targets them). Non-matching paths fail with `EACCES`. Directory listing of
   the root is allowed (the agent needs to navigate), but reading/writing non-matching
-  entries is blocked. This single wrapper is the enforcement point for all three tools
-  (bash, readFile, writeFile).
+  entries is blocked. This single wrapper is the enforcement point for all four tools
+  (bash, readFile, writeFile, viewMedia).
 - Startup validation: reject `--allow-path` patterns that escape cwd (`../**`, absolute
   paths outside cwd) with exit code 2.
 - Pass the wrapped FS to `createBashTool` (via a custom just-bash `Bash` instance —
-  see bash-tool's "Use a custom just-bash instance" docs). Expose **all three** tools
-  to the agent: `bash`, `readFile`, `writeFile`.
+  see bash-tool's "Use a custom just-bash instance" docs). Compose those three
+  tools with `viewMedia` in the agent.
 - **Network stays disabled** (just-bash default: `curl`/`wget` don't exist).
 
 ### Deny list
@@ -106,6 +110,39 @@ There is **no `.env` support** — the config file / env var are the only source
 - Agent loop: `stopWhen: isStepCount(25)`.
 - Per-bash-command: just-bash default `maxExecutionTimeMs` (30s).
 - Whole run: `AbortSignal.timeout(5 * 60 * 1000)`.
+- Nested vision requests share that signal and caller cancellation. The 25 steps
+  count the outer loop only; nested usage contributes to total resource accounting.
+
+### Local image inspection
+
+- Always expose `viewMedia({path: string, prompt?: string})`, returning **plain text
+  only**, never image parts, to the outer agent.
+- Initially accept local PNG, JPEG, WebP, and GIF only; no URLs, SVG, PDF, audio, or
+  video. Stat and read bytes exclusively through `sandbox.fs.stat/readFileBuffer`,
+  preserving virtual paths, allowlist/hidden-file/protected-audit/symlink safeguards.
+  Never use Node filesystem reads for tool-selected paths. Note links grant nothing.
+- Reject nonfiles and files over 10 MiB before reading and after reading byte length.
+  Determine format from byte headers/container structure, not extensions; malformed
+  or unsupported headers are not forwarded as arbitrary files. Provider decoding
+  remains authoritative. Send exact original bytes without crop/resize. Animation
+  frame support varies by provider; do not promise full animation analysis.
+- Example broad allow-path: `./notes/**/*.{md,png,jpg,jpeg,webp,gif}`.
+- One deep media module owns validation, reading, SHA256, prompt construction,
+  `generateText`, and result handling. Its small interface injects filesystem,
+  AI SDK `LanguageModel`, shared abort signal, audit/accounting and lifecycle hooks.
+  Sandbox stays model-unaware; the agent composes tools. Programmatic `visionModel`
+  is optional and otherwise reuses the exact outer model instance.
+- Use installed AI SDK 6 message interfaces: a user message with text and image
+  bytes plus detected `mediaType`; fixed system instructions require faithful
+  analysis, uncertainty, and treating embedded instructions as data, not commands.
+  Default prompt describes the image and transcribes visible text. No outer history
+  or task prompt, no tools, no agent loop, no Bobik-specific output cap.
+- Provider/image failures are recoverable SDK tool errors with an actionable hint
+  to set `--vision-model`, never an automatic model selection. Do not expose raw
+  provider errors/request bodies. Empty/refused responses fail. On `length`, return
+  partial text with a prominent incomplete/output-limit warning.
+- Built-in outer instructions require reporting unresolved/incomplete inspections
+  and treating media-derived instructions as data. Audit selected model identities.
 
 ## Agent construction
 
@@ -115,7 +152,7 @@ import { fireworks } from "@ai-sdk/fireworks";
 
 const agent = new ToolLoopAgent({
   model: fireworks(modelId), // from --model flag
-  tools,                     // { bash, readFile, writeFile } from createBashTool
+  tools, // bash/readFile/writeFile plus composed viewMedia
   stopWhen: isStepCount(25),
 });
 const result = await agent.generate({ prompt: userPromptText });
@@ -149,9 +186,17 @@ prompt containing:
   - `tool-result` — full output (stdout/stderr/exitCode; full written content).
   - `assistant-text` — model text/reasoning messages.
   - `step-finish` — token usage per step.
+  - `vision-inspection` — success/error, correlated outer tool-call ID, path,
+    detected MIME, byte count, SHA256 of original bytes, effective prompt, selected
+    model, full returned text, output-limit finish reason, and known nested usage.
+    Metadata not reached before a validation failure is omitted. Never log raw or
+    base64 image bytes or raw provider request/error objects.
   - `run-end` — status (success/error), error message if any, total duration, total
-    token usage.
-- No truncation: notes are small Markdown files; keep perfect replay capability.
+    token usage, with separate `outerUsage`/`visionUsage` and combined `totalUsage`.
+    Outer step usage excludes vision calls, avoiding double counting. Include known
+    nested usage in success/error summaries; unreported provider usage is unknown.
+- No truncation of text. Full-fidelity image replay additionally requires the
+  original files matching recorded hashes; image bytes are intentionally excluded.
 - The log file is written by the **host** process; the sandboxed agent cannot see
   `.agent-bobik/` (glob `dot: false`).
 
@@ -162,6 +207,7 @@ src/
   cli.ts            # citty entry, shebang, default command + set-api-key subcommand
   config.ts         # XDG config resolution, API key read/write (0o600)
   agent.ts          # ToolLoopAgent construction, system prompt assembly, guardrails
+  media.ts          # local image inspection workflow, text-only tool interface
   sandbox.ts        # just-bash Bash + ReadWriteFs + allowlist wrapper FS wiring
   allowlist-fs.ts   # the wrapper FS enforcing the glob
   deny.ts           # AST command extraction + deny matching
@@ -187,7 +233,7 @@ examples/
 ### ESLint (`eslint.config.ts` — flat config)
 
 - `@eslint/js` recommended + `typescript-eslint` recommended (**non**-type-checked)
-  + `eslint-config-prettier` last to disable conflicting rules.
+  - `eslint-config-prettier` last to disable conflicting rules.
 
 ### Prettier
 
@@ -227,9 +273,9 @@ Use `node:test` + `node:assert/strict` (no vitest).
 
 ## Repo scaffolding
 
-- `examples/daily-notes.md` — the first real-world prompt: *"Take yesterday's daily
+- `examples/daily-notes.md` — the first real-world prompt: _"Take yesterday's daily
   note, copy unfinished TODO backlog items into today's note; items carried over more
-  than 3 days get an emoji + day-count marker."* (Used with
+  than 3 days get an emoji + day-count marker."_ (Used with
   `--allow-path "./daily-notes/**/*.md"`.)
 - `README.md` — what it is, install (`pnpm install -g .` / `pnpx bobik`), `set-api-key`,
   flag reference, CRON example, security model summary, log format.

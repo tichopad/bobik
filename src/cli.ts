@@ -21,7 +21,7 @@ const ANSI_ESCAPE = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
 const HELP = `bobik — a single-purpose AI agent for Markdown notes
 
 Usage:
-  bobik --prompt <path> --allow-path <glob> [--deny "rm,wget"] [--model <id>]
+  bobik --prompt <path> --allow-path <glob> [--deny "rm,wget"] [--model <id>] [--vision-model <id>]
   bobik set-api-key <key>
   bobik --help
 
@@ -30,6 +30,7 @@ Options:
   --allow-path <glob>   Only files matching this glob may be read or written (required)
   --deny <list>         Comma-separated bash command names to block
   --model <id>          Fireworks model ID (default: ${DEFAULT_MODEL})
+  --vision-model <id>   Fireworks image-inspection model ID (default: exact --model)
 
 Environment:
   FIREWORKS_API_KEY     Overrides the key saved by set-api-key
@@ -60,6 +61,10 @@ const runArgs = {
     default: DEFAULT_MODEL,
     description: "Fireworks model ID",
   },
+  "vision-model": {
+    type: "string",
+    description: "Fireworks image-inspection model ID (defaults to --model)",
+  },
 } as const;
 
 const topLevelArgs = {
@@ -67,6 +72,7 @@ const topLevelArgs = {
   "allow-path": { type: "string" },
   deny: { type: "string" },
   model: { type: "string" },
+  "vision-model": { type: "string" },
 } as const;
 
 export const runCommandDefinition = defineCommand({
@@ -85,6 +91,7 @@ export const runCommandDefinition = defineCommand({
       allowPath: args["allow-path"],
       deny: args.deny,
       model: args.model,
+      visionModel: args["vision-model"],
     });
   },
 });
@@ -129,11 +136,15 @@ interface DefaultRunArgs {
   allowPath: string;
   deny?: string;
   model: string;
+  visionModel?: string;
 }
 
 async function runDefault(args: DefaultRunArgs): Promise<void> {
   if (args.model.trim() === "") {
     throw new UsageError("--model requires a value.");
+  }
+  if (args.visionModel !== undefined && args.visionModel.trim() === "") {
+    throw new UsageError("--vision-model requires a value.");
   }
   if (args.deny !== undefined && args.deny.trim() === "") {
     throw new UsageError("--deny requires a non-empty value.");
@@ -157,6 +168,7 @@ async function runDefault(args: DefaultRunArgs): Promise<void> {
     allowPath: args.allowPath,
     deny,
     model: provider(args.model),
+    ...(args.visionModel ? { visionModel: provider(args.visionModel) } : {}),
   });
 
   const text = summary.text.endsWith("\n") ? summary.text : `${summary.text}\n`;
@@ -293,6 +305,7 @@ const FLAGS_WITH_VALUES: ReadonlySet<string> = new Set([
   "--allow-path",
   "--deny",
   "--model",
+  "--vision-model",
 ]);
 
 function assertFlagValues(rawArgs: string[]): void {
