@@ -6,10 +6,16 @@ import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
 import { createFireworks } from "@ai-sdk/fireworks";
 import { defineCommand, runCommand, showUsage, type CommandDef } from "citty";
-import { MAX_STEPS, RUN_TIMEOUT_MS, runNotesAgent } from "./agent.ts";
+import {
+  formatSummary,
+  MAX_STEPS,
+  RUN_TIMEOUT_MS,
+  runNotesAgent,
+} from "./agent.ts";
 import { compileAllowlist } from "./allowlist.ts";
 import { requireApiKey, writeApiKey } from "./config.ts";
 import { RunError, UsageError } from "./errors.ts";
+import { DEFAULT_TRIGGER, watchMode } from "./watch.ts";
 
 export const DEFAULT_MODEL =
   "accounts/fireworks/models/deepseek-v4p1-flash-1017";
@@ -22,6 +28,7 @@ const HELP = `bobik — a single-purpose AI agent for Markdown notes
 
 Usage:
   bobik --prompt <path> --allow-path <glob> [--deny "rm,wget"] [--model <id>] [--vision-model <id>]
+  bobik --prompt <path> --allow-path <glob> --watch [--trigger <string>]
   bobik set-api-key <key>
   bobik --help
 
@@ -31,6 +38,8 @@ Options:
   --deny <list>         Comma-separated bash command names to block
   --model <id>          Fireworks model ID (default: ${DEFAULT_MODEL})
   --vision-model <id>   Fireworks image-inspection model ID (default: exact --model)
+  --watch               Keep watching; re-run when a changed file contains the trigger
+  --trigger <string>    String that triggers a watch-mode run (default: ${DEFAULT_TRIGGER})
 
 Environment:
   FIREWORKS_API_KEY     Overrides the key saved by set-api-key
@@ -65,6 +74,16 @@ const runArgs = {
     type: "string",
     description: "Fireworks image-inspection model ID (defaults to --model)",
   },
+  watch: {
+    type: "boolean",
+    description:
+      "Keep watching; re-run when a changed file contains the trigger",
+  },
+  trigger: {
+    type: "string",
+    default: DEFAULT_TRIGGER,
+    description: "String that triggers a watch-mode run",
+  },
 } as const;
 
 const topLevelArgs = {
@@ -73,6 +92,8 @@ const topLevelArgs = {
   deny: { type: "string" },
   model: { type: "string" },
   "vision-model": { type: "string" },
+  watch: { type: "boolean" },
+  trigger: { type: "string" },
 } as const;
 
 export const runCommandDefinition = defineCommand({
@@ -86,15 +107,20 @@ export const runCommandDefinition = defineCommand({
     if (args._.length > 0) {
       throw new UsageError(`Unexpected argument: ${String(args._[0])}`);
     }
-    await runDefault({
+    runExitCode = await runDefault({
       prompt: args.prompt,
       allowPath: args["allow-path"],
       deny: args.deny,
       model: args.model,
       visionModel: args["vision-model"],
+      watch: args.watch,
+      trigger: args.trigger,
     });
   },
 });
+
+/** Exit code produced by the default command; consumed by main(). */
+let runExitCode = 0;
 
 export const setApiKeyCommand = defineCommand({
   meta: {
@@ -137,9 +163,11 @@ interface DefaultRunArgs {
   deny?: string;
   model: string;
   visionModel?: string;
+  watch?: boolean;
+  trigger?: string;
 }
 
-async function runDefault(args: DefaultRunArgs): Promise<void> {
+async function runDefault(args: DefaultRunArgs): Promise<number> {
   if (args.model.trim() === "") {
     throw new UsageError("--model requires a value.");
   }
@@ -148,6 +176,9 @@ async function runDefault(args: DefaultRunArgs): Promise<void> {
   }
   if (args.deny !== undefined && args.deny.trim() === "") {
     throw new UsageError("--deny requires a non-empty value.");
+  }
+  if (args.trigger !== undefined && args.trigger.trim() === "") {
+    throw new UsageError("--trigger requires a non-empty value.");
   }
 
   const cwd = process.cwd();
@@ -160,6 +191,21 @@ async function runDefault(args: DefaultRunArgs): Promise<void> {
     process.stderr.write(warning);
   }
   const provider = createFireworks({ apiKey });
+  const model = provider(args.model);
+  const visionModel = args.visionModel ? provider(args.visionModel) : undefined;
+
+  if (args.watch) {
+    return watchMode({
+      cwd,
+      promptPath,
+      promptDisplayPath: args.prompt,
+      allowPath: args.allowPath,
+      deny,
+      model,
+      ...(visionModel ? { visionModel } : {}),
+      ...(args.trigger ? { trigger: args.trigger } : {}),
+    });
+  }
 
   const summary = await runNotesAgent({
     cwd,
@@ -167,13 +213,14 @@ async function runDefault(args: DefaultRunArgs): Promise<void> {
     prompt,
     allowPath: args.allowPath,
     deny,
-    model: provider(args.model),
-    ...(args.visionModel ? { visionModel: provider(args.visionModel) } : {}),
+    model,
+    ...(visionModel ? { visionModel } : {}),
   });
 
   const text = summary.text.endsWith("\n") ? summary.text : `${summary.text}\n`;
   process.stdout.write(text);
   process.stderr.write(`${formatSummary(summary)}\n`);
+  return 0;
 }
 
 async function readPrompt(path: string): Promise<string> {
@@ -236,27 +283,6 @@ export function allowPathWarning(
   ].join("\n");
 }
 
-function formatSummary(summary: {
-  steps: number;
-  filesWritten: number;
-  usage: {
-    inputTokens: number | undefined;
-    outputTokens: number | undefined;
-    totalTokens: number | undefined;
-  };
-  logRelativePath: string;
-}): string {
-  const steps = `${summary.steps} ${summary.steps === 1 ? "step" : "steps"}`;
-  const files = `${summary.filesWritten} ${
-    summary.filesWritten === 1 ? "file" : "files"
-  } written`;
-  const input = summary.usage.inputTokens ?? 0;
-  const output = summary.usage.outputTokens ?? 0;
-  const total = summary.usage.totalTokens ?? input + output;
-
-  return `bobik: ${steps}, ${files}, ${total} tokens (in ${input}, out ${output}), log ${summary.logRelativePath}`;
-}
-
 /**
  * Run the CLI and return its exit code. Exported for tests; the executable
  * entry point applies the code to process.exitCode.
@@ -285,7 +311,7 @@ export async function main(rawArgs: string[]): Promise<number> {
   try {
     assertFlagValues(rawArgs);
     await runCommand(mainCommand, { rawArgs });
-    return 0;
+    return runExitCode;
   } catch (error) {
     const { code, message } = classifyError(error);
     process.stderr.write(`bobik: ${message}\n`);
@@ -306,6 +332,7 @@ const FLAGS_WITH_VALUES: ReadonlySet<string> = new Set([
   "--deny",
   "--model",
   "--vision-model",
+  "--trigger",
 ]);
 
 function assertFlagValues(rawArgs: string[]): void {

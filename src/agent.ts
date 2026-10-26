@@ -18,8 +18,13 @@ export interface SystemPromptOptions {
   cwd: string;
   allowPath: string;
   deny?: readonly string[];
-  now?: Date;
   timeZone?: string;
+}
+
+/** One entry of the watch-mode change set handed to a run. */
+export interface ChangedFile {
+  path: string;
+  deleted?: boolean;
 }
 
 export interface RunNotesAgentOptions {
@@ -41,6 +46,14 @@ export interface RunNotesAgentOptions {
   /** Optional caller abort signal, combined with the run timeout. */
   signal?: AbortSignal;
   timeoutMs?: number;
+  /** Watch-mode trigger string, named in the user-message suffix. */
+  trigger?: string;
+  /** Watch-mode change set, listed in the user-message suffix. */
+  changedFiles?: readonly ChangedFile[];
+  /** True for the watch-mode startup run, which has no change set. */
+  initialRun?: boolean;
+  /** Called after any file is written through the sandbox. */
+  onFileWrite?: (path: string) => void;
 }
 
 export interface RunSummary {
@@ -116,7 +129,10 @@ export async function runNotesAgent(
       allowPath: options.allowPath,
       deny,
       timeZone,
-      onFileWrite: (path) => writtenFiles.add(path),
+      onFileWrite: (path) => {
+        writtenFiles.add(path);
+        options.onFileWrite?.(path);
+      },
     });
 
     const viewMedia = createViewMediaTool({
@@ -139,7 +155,6 @@ export async function runNotesAgent(
         cwd: options.cwd,
         allowPath: options.allowPath,
         deny,
-        now,
         timeZone,
       }),
       stopWhen: stepCountIs(MAX_STEPS),
@@ -158,9 +173,17 @@ export async function runNotesAgent(
       },
     });
 
+    const userMessage = `${options.prompt}\n\n${buildUserMessageSuffix({
+      now,
+      timeZone,
+      trigger: options.trigger,
+      changedFiles: options.changedFiles,
+      initialRun: options.initialRun,
+    })}`;
+
     const result = await Promise.race([
       agent.generate({
-        prompt: options.prompt,
+        prompt: userMessage,
         abortSignal: signal,
       }),
       rejectOnAbort(signal),
@@ -233,15 +256,19 @@ export async function runNotesAgent(
   }
 }
 
-/** Built-in system prompt applied on top of the user's prompt file. */
+/**
+ * Built-in system prompt applied on top of the user's prompt file.
+ *
+ * Fully static within a session (no date/time line) so providers can reuse
+ * a cached prompt prefix across runs; the per-run date/time lives in the
+ * user-message suffix instead.
+ */
 export function buildSystemPrompt(options: SystemPromptOptions): string {
-  const now = options.now ?? new Date();
   const timeZone = options.timeZone ?? resolveTimeZone();
   const deny = options.deny ?? [];
   const lines = [
     "You are Bobik, a one-shot CLI agent that maintains a directory of Markdown notes.",
     "",
-    `Current local date/time: ${formatLocalDateTime(now, timeZone)}`,
     `Timezone: ${timeZone}`,
     `Working directory: ${options.cwd}`,
     "Sandbox root: / (inside bash this is the same directory; use relative paths)",
@@ -269,6 +296,66 @@ export function buildSystemPrompt(options: SystemPromptOptions): string {
   );
 
   return lines.join("\n");
+}
+
+export interface UserMessageSuffixOptions {
+  now?: Date;
+  timeZone?: string;
+  trigger?: string;
+  changedFiles?: readonly ChangedFile[];
+  initialRun?: boolean;
+}
+
+/**
+ * Per-run suffix appended to the user message after the prompt file content.
+ * One-shot runs get only the date/time line; watch-mode runs also get the
+ * trigger context (initial run, or the matched trigger plus change set).
+ */
+export function buildUserMessageSuffix(
+  options: UserMessageSuffixOptions,
+): string {
+  const now = options.now ?? new Date();
+  const timeZone = options.timeZone ?? resolveTimeZone();
+  const lines = [
+    `Current local date/time: ${formatLocalDateTime(now, timeZone)}`,
+  ];
+
+  if (options.initialRun) {
+    lines.push("", "Trigger: initial run, no change set.");
+  } else if (options.trigger !== undefined && options.changedFiles) {
+    const count = options.changedFiles.length;
+    lines.push(
+      "",
+      `Trigger: changes to ${count} ${count === 1 ? "file" : "files"} matching "${options.trigger}":`,
+    );
+    for (const file of options.changedFiles) {
+      lines.push(`${file.path}${file.deleted ? " (deleted)" : ""}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+/** One-line stderr summary printed after each run. */
+export function formatSummary(summary: {
+  steps: number;
+  filesWritten: number;
+  usage: {
+    inputTokens: number | undefined;
+    outputTokens: number | undefined;
+    totalTokens: number | undefined;
+  };
+  logRelativePath: string;
+}): string {
+  const steps = `${summary.steps} ${summary.steps === 1 ? "step" : "steps"}`;
+  const files = `${summary.filesWritten} ${
+    summary.filesWritten === 1 ? "file" : "files"
+  } written`;
+  const input = summary.usage.inputTokens ?? 0;
+  const output = summary.usage.outputTokens ?? 0;
+  const total = summary.usage.totalTokens ?? input + output;
+
+  return `bobik: ${steps}, ${files}, ${total} tokens (in ${input}, out ${output}), log ${summary.logRelativePath}`;
 }
 
 /** The IANA timezone used by the host, falling back to a fixed-offset zone. */

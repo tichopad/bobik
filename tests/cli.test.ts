@@ -184,6 +184,16 @@ describe("cli", () => {
     ]);
     assert.equal(deny.code, 2);
     assert.match(deny.stderr, /--deny requires a value/);
+
+    const trigger = await runCli([
+      "--prompt",
+      "prompt.md",
+      "--allow-path",
+      "./notes/**/*.md",
+      "--trigger",
+    ]);
+    assert.equal(trigger.code, 2);
+    assert.match(trigger.stderr, /--trigger requires a value/);
   });
 
   it("rejects extra set-api-key arguments", async () => {

@@ -54,16 +54,19 @@ run `bobik set-api-key`.
 
 ```console
 bobik --prompt <path> --allow-path <glob> [--deny "rm,wget"] [--model <id>] [--vision-model <id>]
+bobik --prompt <path> --allow-path <glob> --watch [--trigger <string>]
 bobik set-api-key <key>
 ```
 
 | Flag                  | Required | Description                                                                                                                                                |
 | --------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--prompt <path>`     | yes      | Markdown file with task instructions. Read by the host process, so it may live anywhere.                                                                   |
+| `--prompt <path>`     | yes      | Markdown file with task instructions. Read by the host process, so it may live anywhere. In watch mode it is re-read before every run.                     |
 | `--allow-path <glob>` | yes      | Only files matching this glob (resolved relative to the current directory) may be read or written. Example: `"./daily-notes/**/*.md"`.                     |
 | `--deny <list>`       | no       | Comma-separated bash command names to block, e.g. `"rm,wget"`.                                                                                             |
 | `--model <id>`        | no       | Fireworks model ID. Default: `accounts/fireworks/models/deepseek-v4p1-flash-1017`.                                                                         |
 | `--vision-model <id>` | no       | Fireworks model ID for image inspection, using the same API key. Defaults to the exact `--model` selection; no automatic fallback or capability preflight. |
+| `--watch`             | no       | Keep running: watch the allow-path's base directory and re-run the agent when a changed file contains the trigger string.                                  |
+| `--trigger <string>`  | no       | String that a changed/added file must contain to trigger a watch-mode run. Default: `@bobik`. Case-sensitive substring match.                              |
 
 Example:
 
@@ -118,6 +121,51 @@ Vision requests share the run's five-minute timeout and caller cancellation; the
 summary and audit totals (including known usage on failures). An aborted/failed
 provider request may not report usage. Programmatic callers can inject an optional
 AI SDK `LanguageModel` as `visionModel`; omitting it reuses the exact `model` instance.
+
+## Watch mode
+
+```console
+cd ~/notes
+bobik --prompt ~/.config/bobik/daily-notes.md --allow-path "./daily-notes/**/*.md" --watch
+```
+
+With `--watch`, Bobik runs the agent once at startup (with an explicit "initial
+run, no change set" context), then keeps watching the allow-path's leading
+literal directory recursively. A changed or added file triggers a new run only
+when its raw content contains the trigger string (`@bobik` by default, set with
+`--trigger`; case-sensitive substring). Tag a note with `@bobik` wherever you
+want Bobik to react; untagged edits never start a run. Deleting a file never
+triggers a run, but deleted paths are listed (marked `(deleted)`) in the change
+set of the next triggered run.
+
+Each triggered run gets a user-message suffix with the current date/time, the
+matched trigger, and the changed-files list; the system prompt and the prompt
+file content stay byte-stable so providers can reuse their prefix cache. The
+prompt file is re-read from disk before every run, so editing the instructions
+takes effect without a restart; if it becomes unreadable mid-session, the whole
+session stops with exit code 1.
+
+Loop guards:
+
+- Writes the agent makes itself are ignored while the run is in flight and for
+  about a second afterwards.
+- A file re-triggers only when its content hash actually changed (in-memory
+  only; nothing persists across restarts).
+- Runs are serialized; events arriving during a run coalesce into at most one
+  follow-up run. Every run keeps the usual 25-step / 5-minute limits.
+- A failed run is retried exactly once after 60 seconds. If the retry also
+  fails, Bobik logs "gave up" to stderr and the audit log, and waits for the
+  next real edit instead of looping.
+
+stdout carries only the stream of run summaries (one final answer per run);
+watcher status lines (watching root, triggers, retries, give-ups) go to stderr.
+The first SIGINT/SIGTERM stops watching and lets the in-flight run finish
+(exit 0); a second signal aborts it immediately (exit 130). `--deny`,
+`--model`, `--vision-model`, and `--allow-path` are fixed at startup.
+
+Known limitation: filesystem events emitted while the OS is suspended may be
+missed, so changes made during sleep might not trigger a run until something
+else touches the watched directory.
 
 ## CRON example
 

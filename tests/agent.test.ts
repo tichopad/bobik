@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   buildSystemPrompt,
+  buildUserMessageSuffix,
   formatLocalDateTime,
   resolveTimeZone,
 } from "../src/agent.ts";
@@ -69,19 +70,18 @@ function withTimeZone(value: string, run: () => void): void {
 }
 
 describe("buildSystemPrompt", () => {
-  const date = new Date("2026-10-19T17:55:00.123Z");
-
-  it("includes the resolved date, timezone, cwd and allowlist", () => {
+  it("includes the timezone, cwd and allowlist but no date/time line", () => {
     const prompt = buildSystemPrompt({
       cwd: "/notes",
       allowPath: "./daily-notes/**/*.md",
       deny: [],
-      now: date,
       timeZone: "Europe/Prague",
     });
 
-    assert.match(prompt, /Monday, October 19, 2026 at 19:55 GMT\+2/);
-    assert.match(prompt, /Europe\/Prague/);
+    // The system prompt stays byte-static for prefix caching; the per-run
+    // date/time lives in the user-message suffix instead.
+    assert.doesNotMatch(prompt, /Current local date\/time/);
+    assert.match(prompt, /Timezone: Europe\/Prague/);
     assert.match(prompt, /Working directory: \/notes/);
     assert.match(prompt, /Sandbox root: \//);
     assert.match(prompt, /\.\/daily-notes\/\*\*\/\*\.md/);
@@ -93,7 +93,6 @@ describe("buildSystemPrompt", () => {
       cwd: "/notes",
       allowPath: "./**/*.md",
       deny: ["rm", "wget"],
-      now: date,
       timeZone: "UTC",
     });
 
@@ -105,7 +104,6 @@ describe("buildSystemPrompt", () => {
       cwd: "/notes",
       allowPath: "./**/*.md",
       deny: [],
-      now: date,
       timeZone: "UTC",
     });
 
@@ -117,7 +115,6 @@ describe("buildSystemPrompt", () => {
       cwd: "/notes",
       allowPath: "./**/*.md",
       deny: [],
-      now: date,
       timeZone: "UTC",
     });
 
@@ -126,5 +123,59 @@ describe("buildSystemPrompt", () => {
     assert.match(prompt, /bash/);
     assert.match(prompt, /one-shot/i);
     assert.match(prompt, /do not ask questions/i);
+  });
+});
+
+describe("buildUserMessageSuffix", () => {
+  const date = new Date("2026-10-19T17:55:00.123Z");
+
+  it("carries only the date/time line for one-shot runs", () => {
+    const suffix = buildUserMessageSuffix({
+      now: date,
+      timeZone: "Europe/Prague",
+    });
+
+    assert.match(
+      suffix,
+      /Current local date\/time: Monday, October 19, 2026 at 19:55 GMT\+2/,
+    );
+    assert.doesNotMatch(suffix, /Trigger:/);
+  });
+
+  it("states the initial run has no change set", () => {
+    const suffix = buildUserMessageSuffix({
+      now: date,
+      timeZone: "UTC",
+      initialRun: true,
+    });
+
+    assert.match(suffix, /Trigger: initial run, no change set\./);
+  });
+
+  it("names the trigger and lists changed files, marking deletions", () => {
+    const suffix = buildUserMessageSuffix({
+      now: date,
+      timeZone: "UTC",
+      trigger: "@bobik",
+      changedFiles: [
+        { path: "daily-notes/a.md" },
+        { path: "daily-notes/b.md", deleted: true },
+      ],
+    });
+
+    assert.match(suffix, /Trigger: changes to 2 files matching "@bobik":/);
+    assert.match(suffix, /daily-notes\/a\.md\n/);
+    assert.match(suffix, /daily-notes\/b\.md \(deleted\)/);
+  });
+
+  it("uses singular wording for a single changed file", () => {
+    const suffix = buildUserMessageSuffix({
+      now: date,
+      timeZone: "UTC",
+      trigger: "@bobik",
+      changedFiles: [{ path: "a.md" }],
+    });
+
+    assert.match(suffix, /Trigger: changes to 1 file matching "@bobik":/);
   });
 });

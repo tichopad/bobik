@@ -25,6 +25,11 @@ export interface Allowlist {
    * so runs that create new directories stay quiet.
    */
   readonly escapedBaseDirectories: readonly string[];
+  /**
+   * Virtual path of the glob's leading literal segments (`/` when the glob
+   * has none). Watch mode roots its file watcher at this directory.
+   */
+  readonly baseDirectory: string;
   /** True when the virtual path matches the allow glob. */
   matches(path: string): boolean;
   /** True when a directory may be listed or navigated. */
@@ -137,6 +142,7 @@ export function compileAllowlist(cwd: string, allowGlob: string): Allowlist {
   return {
     pattern,
     escapedBaseDirectories,
+    baseDirectory: base,
     matches(path: string): boolean {
       try {
         return matcher(normalizeVirtualPath(path));
