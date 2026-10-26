@@ -155,7 +155,7 @@ describe("smoke: agent against a notes directory", () => {
       visionModel: "mock-model",
     });
     assert.equal(events[0]?.timeZone, "Europe/Prague");
-    assert.match(String(events[0]?.localDateTime), /19:55:00/);
+    assert.match(String(events[0]?.localDateTime), /19:55/);
 
     const last = events.at(-1);
     assert.equal(last?.type, "run-end");

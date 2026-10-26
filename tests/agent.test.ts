@@ -12,18 +12,18 @@ describe("formatLocalDateTime", () => {
 
     assert.equal(
       formatLocalDateTime(date, "Europe/Prague"),
-      "Monday, October 19, 2026 at 19:55:00 GMT+2",
+      "Monday, October 19, 2026 at 19:55 GMT+2",
     );
     assert.equal(
       formatLocalDateTime(date, "UTC"),
-      "Monday, October 19, 2026 at 17:55:00 UTC",
+      "Monday, October 19, 2026 at 17:55 UTC",
     );
   });
 
   it("falls back to host-local time for an invalid zone", () => {
     assert.match(
       formatLocalDateTime(new Date("2026-10-19T17:55:00.123Z"), "Etc/Unknown"),
-      /^Monday, October 19, 2026 at \d{2}:\d{2}:\d{2} /,
+      /^Monday, October 19, 2026 at \d{2}:\d{2} /,
     );
   });
 });
@@ -42,7 +42,7 @@ describe("resolveTimeZone", () => {
       assert.equal(resolveTimeZone(date), "Etc/GMT-5");
       assert.equal(
         formatLocalDateTime(date, resolveTimeZone(date)),
-        "Tuesday, October 20, 2026 at 04:30:00 GMT+5",
+        "Tuesday, October 20, 2026 at 04:30 GMT+5",
       );
     });
   });
@@ -80,7 +80,7 @@ describe("buildSystemPrompt", () => {
       timeZone: "Europe/Prague",
     });
 
-    assert.match(prompt, /Monday, October 19, 2026 at 19:55:00 GMT\+2/);
+    assert.match(prompt, /Monday, October 19, 2026 at 19:55 GMT\+2/);
     assert.match(prompt, /Europe\/Prague/);
     assert.match(prompt, /Working directory: \/notes/);
     assert.match(prompt, /Sandbox root: \//);
