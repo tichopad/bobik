@@ -137,6 +137,73 @@ describe("AllowlistFs", () => {
     assert.equal(await fs.readFile("/daily-notes/sub/2026-10-19.md"), "today");
   });
 
+  it("keeps drafts readable but blocks every direct mutation", async () => {
+    const path = "/daily-notes/2026-10-18.md";
+    const draft = "#bobik: ready\n%% #bobik: still drafting";
+    await fixture.inner.writeFile(path, draft);
+    assert.equal(await fs.readFile(path), draft);
+    for (const mutate of [
+      () => fs.writeFile(path, "replacement"),
+      () => fs.appendFile(path, " appended"),
+      () => fs.rm(path),
+      () => fs.mv(path, "/daily-notes/new.md"),
+      () => fs.mv("/daily-notes/sub/2026-10-19.md", path),
+      () => fs.cp("/daily-notes/sub/2026-10-19.md", path),
+      () => fs.chmod(path, 0o600),
+      () => fs.utimes(path, new Date(), new Date()),
+      () => fs.link(path, "/daily-notes/alias.md"),
+    ]) {
+      await rejectedWithEacces(mutate());
+      assert.equal(await fixture.inner.readFile(path), draft);
+    }
+  });
+
+  it("rechecks drafts after a read and releases protection after uncommenting", async () => {
+    const path = "/daily-notes/2026-10-18.md";
+    await fs.readFile(path);
+    await fixture.inner.writeFile(path, "%% #bobik: draft %%");
+    await rejectedWithEacces(fs.writeFile(path, "stale replacement"));
+    await fixture.inner.writeFile(path, "#bobik: ready");
+    await fs.writeFile(path, "done");
+    assert.equal(await fixture.inner.readFile(path), "done");
+  });
+
+  it("blocks recursive deletion and moves containing a draft", async () => {
+    await fixture.inner.writeFile(
+      "/daily-notes/sub/2026-10-19.md",
+      "%% #bobik: draft %%",
+    );
+    await rejectedWithEacces(fs.rm("/daily-notes/sub", { recursive: true }));
+    await rejectedWithEacces(fs.mv("/daily-notes/sub", "/daily-notes/moved"));
+    assert.equal(
+      await fixture.inner.exists("/daily-notes/sub/2026-10-19.md"),
+      true,
+    );
+  });
+
+  it("blocks recursive copies overwriting a draft", async () => {
+    await fixture.inner.mkdir("/daily-notes/copy", { recursive: true });
+    await fixture.inner.writeFile(
+      "/daily-notes/copy/2026-10-19.md",
+      "%% #bobik: draft %%",
+    );
+    await rejectedWithEacces(
+      fs.cp("/daily-notes/sub", "/daily-notes/copy", { recursive: true }),
+    );
+  });
+
+  it("protects custom trigger drafts without treating code examples as drafts", async () => {
+    const path = "/daily-notes/2026-10-18.md";
+    const customFs = new AllowlistFs(fixture.inner, {
+      allowlist: compileAllowlist(fixture.root, "./daily-notes/**/*.md"),
+      trigger: "@custom",
+    });
+    await fixture.inner.writeFile(path, "%% @custom draft %%");
+    await rejectedWithEacces(customFs.writeFile(path, "replacement"));
+    await fixture.inner.writeFile(path, "`%% #bobik: example %%`");
+    await fs.writeFile(path, "allowed");
+  });
+
   it("rejects reads outside the allowlist", async () => {
     await rejectedWithEacces(fs.readFile("/other/secret.md"));
     await rejectedWithEacces(

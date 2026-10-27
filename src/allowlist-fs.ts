@@ -1,4 +1,5 @@
 import { posix } from "node:path";
+import { analyzeNote, DEFAULT_TRIGGER } from "./trigger.ts";
 import { unsafeBytesFromLatin1 } from "just-bash";
 import type {
   BufferEncoding,
@@ -19,6 +20,8 @@ import {
 
 export interface AllowlistFsOptions {
   allowlist: Allowlist;
+  /** Commented drafts using this trigger make their entire note read-only. */
+  trigger?: string;
   /** Called after a file is created or modified through this filesystem. */
   onWrite?: (path: string) => void;
 }
@@ -64,11 +67,13 @@ const PROTECTED_DIRECTORY = "/.agent-bobik";
 export class AllowlistFs implements IFileSystem {
   private readonly inner: IFileSystem;
   private readonly allowlist: Allowlist;
+  private readonly trigger: string;
   private readonly onWrite: ((path: string) => void) | undefined;
 
   constructor(inner: IFileSystem, options: AllowlistFsOptions) {
     this.inner = inner;
     this.allowlist = options.allowlist;
+    this.trigger = options.trigger ?? DEFAULT_TRIGGER;
     this.onWrite = options.onWrite;
   }
 
@@ -109,6 +114,7 @@ export class AllowlistFs implements IFileSystem {
       return;
     }
     const target = this.requireFile(path, "write");
+    await this.assertMutable(target);
     await this.inner.writeFile(target, content, options);
     this.notifyWrite(target);
   }
@@ -122,6 +128,7 @@ export class AllowlistFs implements IFileSystem {
       return;
     }
     const target = this.requireFile(path, "append");
+    await this.assertMutable(target);
     await this.inner.appendFile(target, content, options);
     this.notifyWrite(target);
   }
@@ -182,6 +189,7 @@ export class AllowlistFs implements IFileSystem {
     if (!this.inner.createExclusive) {
       throw denied(path, "create");
     }
+    if (!options.directory) await this.assertMutable(target);
     await this.inner.createExclusive(target, options);
     if (!options.directory) {
       this.notifyWrite(target);
@@ -229,6 +237,8 @@ export class AllowlistFs implements IFileSystem {
       }
     } else if (!this.allowlist.matches(target)) {
       throw denied(path, "remove");
+    } else {
+      await this.assertMutable(target);
     }
 
     return this.inner.rm(target, options);
@@ -254,6 +264,7 @@ export class AllowlistFs implements IFileSystem {
 
     this.requireFile(source, "cp");
     this.requireFile(target, "cp");
+    await this.assertMutable(target);
     await this.inner.cp(source, target, options);
     this.notifyWrite(target);
   }
@@ -269,6 +280,7 @@ export class AllowlistFs implements IFileSystem {
       }
       await this.assertCopyMapping(source, target);
       const files = await this.collectTreeFiles(source);
+      for (const file of files) await this.assertMutable(file);
       await this.inner.mv(source, target);
       for (const file of files) {
         this.notifyWrite(posix.join(target, posix.relative(source, file)));
@@ -278,6 +290,8 @@ export class AllowlistFs implements IFileSystem {
 
     this.requireFile(source, "mv");
     this.requireFile(target, "mv");
+    await this.assertMutable(source);
+    await this.assertMutable(target);
     await this.inner.mv(source, target);
     this.notifyWrite(target);
   }
@@ -302,7 +316,9 @@ export class AllowlistFs implements IFileSystem {
     if (this.device(path)) {
       return;
     }
-    return this.inner.chmod(this.requireFile(path, "chmod"), mode);
+    const target = this.requireFile(path, "chmod");
+    await this.assertMutable(target);
+    return this.inner.chmod(target, mode);
   }
 
   async symlink(target: string, linkPath: string): Promise<void> {
@@ -314,6 +330,8 @@ export class AllowlistFs implements IFileSystem {
   async link(existingPath: string, newPath: string): Promise<void> {
     const existing = this.requireFile(existingPath, "link");
     const created = this.requireFile(newPath, "link");
+    await this.assertMutable(existing);
+    await this.assertMutable(created);
     return this.inner.link(existing, created);
   }
 
@@ -340,7 +358,9 @@ export class AllowlistFs implements IFileSystem {
     if (this.device(path)) {
       return;
     }
-    return this.inner.utimes(this.requireFile(path, "utimes"), atime, mtime);
+    const target = this.requireFile(path, "utimes");
+    await this.assertMutable(target);
+    return this.inner.utimes(target, atime, mtime);
   }
 
   private async filteredDirents(path: string): Promise<DirentEntry[]> {
@@ -464,6 +484,7 @@ export class AllowlistFs implements IFileSystem {
       if (!this.allowlist.matches(child)) {
         throw denied(child, "remove");
       }
+      await this.assertMutable(child);
     }
   }
 
@@ -500,6 +521,16 @@ export class AllowlistFs implements IFileSystem {
           "cp",
         );
       }
+      await this.assertMutable(childTarget);
+    }
+  }
+
+  /** Read fresh contents on every mutation, never a startup snapshot. */
+  private async assertMutable(path: string): Promise<void> {
+    if (!(await this.inner.exists(path))) return;
+    const content = await this.inner.readFile(path, "utf8");
+    if (analyzeNote(content, this.trigger).draft) {
+      throw denied(path, "modify protected draft");
     }
   }
 

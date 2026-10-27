@@ -66,7 +66,7 @@ bobik set-api-key <key>
 | `--model <id>`        | no       | Fireworks model ID. Default: `accounts/fireworks/models/deepseek-v4p1-flash-1017`.                                                                         |
 | `--vision-model <id>` | no       | Fireworks model ID for image inspection, using the same API key. Defaults to the exact `--model` selection; no automatic fallback or capability preflight. |
 | `--watch`             | no       | Keep running: watch the allow-path's base directory and re-run the agent when a changed file contains the trigger string.                                  |
-| `--trigger <string>`  | no       | String that a changed/added file must contain to trigger a watch-mode run. Default: `@bobik`. Case-sensitive substring match.                              |
+| `--trigger <string>`  | no       | Watch-mode trigger. Default: standalone `#bobik` tag. Custom strings use case-sensitive literal matching. Comments and code are excluded.                  |
 
 Example:
 
@@ -132,11 +132,38 @@ bobik --prompt ~/.config/bobik/daily-notes.md --allow-path "./daily-notes/**/*.m
 With `--watch`, Bobik runs the agent once at startup (with an explicit "initial
 run, no change set" context), then keeps watching the allow-path's leading
 literal directory recursively. A changed or added file triggers a new run only
-when its raw content contains the trigger string (`@bobik` by default, set with
-`--trigger`; case-sensitive substring). Tag a note with `@bobik` wherever you
-want Bobik to react; untagged edits never start a run. Deleting a file never
+when it contains a ready trigger (`#bobik` by default, set with `--trigger`).
+The default matches a standalone, case-sensitive tag followed by a colon,
+whitespace, or end-of-file; `#bobik-draft`, `#bobik/foo`, and `#bobik123` do not
+match. Custom triggers retain case-sensitive literal substring matching.
+Untagged edits never start a run. Deleting a file never
 triggers a run, but deleted paths are listed (marked `(deleted)`) in the change
 set of the next triggered run.
+
+Draft instructions inside Obsidian `%%` comments, then **uncomment to submit**:
+
+```markdown
+%%
+#bobik: Reorganize this section.
+Keep all links and unfinished tasks.
+%%
+```
+
+Both inline and multiline comments work. An opening `%%` without a closing
+delimiter comments out the rest of the note, so partially synced drafts stay
+protected. A commented trigger makes the **entire note read-only to Bobik**:
+it cannot trigger a run or be modified, moved, or deleted, even by a startup
+run or a run triggered elsewhere. This also applies when the note contains a
+ready request alongside a draft; release all drafts before submitting.
+The filesystem checks current contents again before each mutation, so
+re-commenting a request protects it during an ongoing run too. Inline code
+and fenced code blocks contain neither active triggers nor comment delimiters.
+Draft instructions must never be treated as requests during any run.
+
+This is not a distributed lock: Bobik cannot see edits still waiting to sync,
+and a local external write can race with the check and mutation. After
+submitting, re-comment and let Sync deliver the change before resuming edits.
+The old `@bobik` default is no longer active; use `--trigger '@bobik'` if needed.
 
 Each triggered run gets a user-message suffix with the current date/time, the
 matched trigger, and the changed-files list; the system prompt and the prompt

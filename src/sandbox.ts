@@ -11,6 +11,8 @@ export interface NotesSandboxOptions {
   allowPath: string;
   /** Command names blocked in bash. */
   deny?: readonly string[];
+  /** Trigger whose commented drafts protect notes from modification. */
+  trigger?: string;
   /** Timezone name handed to the shell so `date` agrees with the prompt. */
   timeZone: string;
   /** Called after any file is created or modified through the sandbox. */
@@ -44,6 +46,7 @@ export async function createNotesSandbox(
   });
   const fs = new AllowlistFs(inner, {
     allowlist,
+    trigger: options.trigger,
     onWrite: options.onFileWrite,
   });
 

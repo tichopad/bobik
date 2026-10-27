@@ -46,6 +46,7 @@
     "chokidar": "^6.0.0",
     "citty": "0.2.2",
     "just-bash": "3.6.0",
+    "mdast-util-from-markdown": "2.1.0",
     "picomatch": "4.0.7"
   },
   "devDependencies": {

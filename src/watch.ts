@@ -12,8 +12,9 @@ import {
 } from "./agent.ts";
 import { compileAllowlist } from "./allowlist.ts";
 import { RunError } from "./errors.ts";
+import { analyzeNote, DEFAULT_TRIGGER } from "./trigger.ts";
 
-export const DEFAULT_TRIGGER = "@bobik";
+export { DEFAULT_TRIGGER } from "./trigger.ts";
 export const SETTLE_MS = 1_000;
 export const RETRY_DELAY_MS = 60_000;
 export const AWAIT_WRITE_FINISH_MS = 500;
@@ -170,7 +171,10 @@ export async function watchMode(options: WatchModeOptions): Promise<number> {
       // The file vanished between the event and the read.
       return;
     }
-    if (!content.includes(trigger)) {
+    if (!analyzeNote(content, trigger).ready) {
+      pending.triggered.delete(path);
+      pendingRetry?.triggered.delete(path);
+      hashes.delete(path);
       return;
     }
     const hash = createHash("sha256").update(content).digest("hex");
@@ -189,7 +193,9 @@ export async function watchMode(options: WatchModeOptions): Promise<number> {
       return;
     }
     const hasWork =
-      pending.initial || pending.triggered.size > 0 || pendingRetry;
+      pending.initial ||
+      pending.triggered.size > 0 ||
+      (pendingRetry && retryTimer === undefined);
     if (!hasWork) {
       return;
     }
@@ -220,6 +226,25 @@ export async function watchMode(options: WatchModeOptions): Promise<number> {
     const run = takePending();
     inFlightWrites.clear();
 
+    // Queued requests (including retries) may have been re-commented meanwhile.
+    for (const path of run.triggered) {
+      try {
+        const content = await readFile(join(options.cwd, path), "utf8");
+        if (analyzeNote(content, trigger).ready) continue;
+      } catch {
+        // A missing or unreadable note cannot submit a request.
+      }
+      run.triggered.delete(path);
+      hashes.delete(path);
+    }
+    if (!run.initial && run.triggered.size === 0) {
+      for (const path of run.deleted) pending.deleted.add(path);
+      running = false;
+      if (stopping || exitCode !== undefined) await shutdown(exitCode ?? 0);
+      else schedule();
+      return;
+    }
+
     let prompt: string;
     try {
       prompt = await readFile(options.promptPath, "utf8");
@@ -243,12 +268,13 @@ export async function watchMode(options: WatchModeOptions): Promise<number> {
         promptPath: options.promptDisplayPath,
         prompt,
         allowPath: options.allowPath,
+        trigger,
         deny: options.deny,
         model: options.model,
         ...(options.visionModel ? { visionModel: options.visionModel } : {}),
         signal: abortController.signal,
         onFileWrite: (path) => inFlightWrites.add(path),
-        ...(run.initial ? { initialRun: true } : { trigger, changedFiles }),
+        ...(run.initial ? { initialRun: true } : { changedFiles }),
       });
       const text = summary.text.endsWith("\n")
         ? summary.text

@@ -179,12 +179,96 @@ describe("watch mode", () => {
     assert.equal(await stopWatch(harness), 0);
   });
 
+  it("waits for uncommenting and protects mixed ready/draft notes", async () => {
+    harness = await startWatch();
+    await waitFor(() => harness!.runs.length === 1, "initial run");
+    const note = join(harness.root, "daily-notes", "draft.md");
+    for (const content of [
+      "%% #bobik: drafting",
+      "%% #bobik: drafting %%",
+      "#bobik: ready\n%% #bobik: drafting %%",
+      "`#bobik`\n```\n#bobik\n```\n#bobik-draft\n@bobik: old",
+    ]) {
+      await writeFile(note, content);
+      await settle(300);
+      assert.equal(harness.runs.length, 1);
+    }
+    await writeFile(note, "#bobik: ready");
+    await waitFor(() => harness!.runs.length === 2, "uncommented request");
+    assert.equal(harness.runs[1]?.trigger, "#bobik");
+    // Re-commenting and releasing identical submitted bytes must re-trigger.
+    await writeFile(note, "%% #bobik: ready %%");
+    await settle(300);
+    await writeFile(note, "#bobik: ready");
+    await waitFor(() => harness!.runs.length === 3, "resubmitted request");
+  });
+
+  it("drops a queued request re-commented during another run", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    harness = await startWatch({
+      onGenerate: async (_call, runIndex) => {
+        if (runIndex === 0) await gate;
+        return undefined;
+      },
+    });
+    await waitFor(() => harness!.runs.length === 1, "initial run");
+    const note = join(harness.root, "daily-notes", "draft.md");
+    try {
+      await writeFile(note, "#bobik: ready");
+      await waitFor(
+        () => harness!.stderr.some((line) => line.includes("run triggered")),
+        "queued request",
+      );
+      await writeFile(note, "%% #bobik: drafting again %%");
+      // Release immediately: execution must recheck even before the next event.
+    } finally {
+      release();
+    }
+    await settle();
+    assert.equal(harness.runs.length, 1);
+  });
+
+  it("cancels retries when a request becomes a draft", async () => {
+    harness = await startWatch({
+      watch: { retryDelayMs: 500 },
+      onGenerate: (_call, runIndex) => {
+        if (runIndex > 0) throw new Error("try later");
+        return undefined;
+      },
+    });
+    await waitFor(() => harness!.runs.length === 1, "initial run");
+    const note = join(harness.root, "daily-notes", "draft.md");
+    await writeFile(note, "#bobik: ready");
+    await waitFor(
+      () => harness!.stderr.some((line) => line.includes("retrying")),
+      "retry scheduled",
+    );
+    await writeFile(note, "%% #bobik: drafting again %%");
+    await settle(800);
+    assert.equal(harness.runs.length, 2);
+  });
+
+  it("keeps custom triggers literal but ignores their commented drafts", async () => {
+    harness = await startWatch({ watch: { trigger: "@custom" } });
+    await waitFor(() => harness!.runs.length === 1, "initial run");
+    assert.equal(harness.runs[0]?.trigger, "@custom");
+    const note = join(harness.root, "daily-notes", "custom.md");
+    await writeFile(note, "%% @custom-suffix %%");
+    await settle(300);
+    assert.equal(harness.runs.length, 1);
+    await writeFile(note, "prefix@custom-suffix");
+    await waitFor(() => harness!.runs.length === 2, "custom request");
+  });
+
   it("deduplicates by content hash: same content does not re-trigger", async () => {
     harness = await startWatch();
     await waitFor(() => harness!.runs.length === 1, "initial run");
 
     const note = join(harness.root, "daily-notes", "a.md");
-    await writeFile(note, "task @bobik v1\n");
+    await writeFile(note, "task #bobik v1\n");
     await waitFor(() => harness!.runs.length === 2, "run for v1");
     assert.deepEqual(
       harness.runs[1]?.changedFiles?.map((file) => file.path),
@@ -192,11 +276,11 @@ describe("watch mode", () => {
     );
 
     // Same bytes again: the event fires but the hash matches.
-    await writeFile(note, "task @bobik v1\n");
+    await writeFile(note, "task #bobik v1\n");
     await settle();
     assert.equal(harness.runs.length, 2);
 
-    await writeFile(note, "task @bobik v2\n");
+    await writeFile(note, "task #bobik v2\n");
     await waitFor(() => harness!.runs.length === 3, "run for v2");
 
     assert.equal(await stopWatch(harness), 0);
@@ -210,7 +294,7 @@ describe("watch mode", () => {
     await settle();
     assert.equal(harness.runs.length, 1);
 
-    await writeFile(join(harness.root, "daily-notes", "plain.md"), "@bobik\n");
+    await writeFile(join(harness.root, "daily-notes", "plain.md"), "#bobik\n");
     await waitFor(() => harness!.runs.length === 2, "tagged run");
 
     assert.equal(await stopWatch(harness), 0);
@@ -232,7 +316,7 @@ describe("watch mode", () => {
               toolName: "writeFile",
               input: JSON.stringify({
                 path: "daily-notes/agent.md",
-                content: "written by the agent @bobik\n",
+                content: "written by the agent #bobik\n",
               }),
             },
           ],
@@ -280,8 +364,8 @@ describe("watch mode", () => {
     await firstRunGate;
 
     // Two tagged writes while the initial run is still in flight.
-    await writeFile(join(harness.root, "daily-notes", "a.md"), "@bobik a\n");
-    await writeFile(join(harness.root, "daily-notes", "b.md"), "@bobik b\n");
+    await writeFile(join(harness.root, "daily-notes", "a.md"), "#bobik a\n");
+    await writeFile(join(harness.root, "daily-notes", "b.md"), "#bobik b\n");
     await settle(300);
     releaseFirstRun();
 
@@ -309,7 +393,7 @@ describe("watch mode", () => {
     });
     await waitFor(() => harness!.runs.length === 1, "initial run");
 
-    await writeFile(join(harness.root, "daily-notes", "a.md"), "@bobik\n");
+    await writeFile(join(harness.root, "daily-notes", "a.md"), "#bobik\n");
     await waitFor(() => harness!.runs.length === 3, "retry");
     assert.ok(
       harness.stderr.some((line) => /retrying/.test(line)),
@@ -334,7 +418,7 @@ describe("watch mode", () => {
     });
     await waitFor(() => harness!.runs.length === 1, "initial run");
 
-    await writeFile(join(harness.root, "daily-notes", "a.md"), "@bobik\n");
+    await writeFile(join(harness.root, "daily-notes", "a.md"), "#bobik\n");
     await waitFor(() => harness!.runs.length === 3, "failed retry");
     await waitFor(
       () =>
@@ -364,7 +448,7 @@ describe("watch mode", () => {
     await waitFor(() => harness!.runs.length === 1, "initial run");
 
     const doomed = join(harness.root, "daily-notes", "doomed.md");
-    await writeFile(doomed, "@bobik delete me\n");
+    await writeFile(doomed, "#bobik delete me\n");
     await waitFor(() => harness!.runs.length === 2, "run for the new file");
 
     // Deleting a tagged file must not trigger a run on its own.
@@ -372,7 +456,7 @@ describe("watch mode", () => {
     await settle();
     assert.equal(harness.runs.length, 2);
 
-    await writeFile(join(harness.root, "daily-notes", "other.md"), "@bobik\n");
+    await writeFile(join(harness.root, "daily-notes", "other.md"), "#bobik\n");
     await waitFor(() => harness!.runs.length === 3, "run after deletion");
     assert.deepEqual(harness.runs[2]?.changedFiles, [
       { path: "daily-notes/other.md" },
@@ -387,7 +471,7 @@ describe("watch mode", () => {
     await waitFor(() => harness!.runs.length === 1, "initial run");
 
     await rm(join(harness.root, "prompt.md"));
-    await writeFile(join(harness.root, "daily-notes", "a.md"), "@bobik\n");
+    await writeFile(join(harness.root, "daily-notes", "a.md"), "#bobik\n");
 
     const code = await harness.session;
     assert.equal(code, 1);
