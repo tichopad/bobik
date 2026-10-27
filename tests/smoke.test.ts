@@ -370,6 +370,49 @@ describe("smoke: agent against a notes directory", () => {
     );
   });
 
+  it("honors a custom step limit", async () => {
+    root = await mkdtemp(join(tmpdir(), "bobik-smoke-"));
+    await mkdir(join(root, "daily-notes"), { recursive: true });
+
+    const model = new MockLanguageModelV3({
+      modelId: "mock-model",
+      doGenerate: Array.from({ length: 10 }, (_, index) => ({
+        content: [
+          {
+            type: "tool-call" as const,
+            toolCallId: `call-${index}`,
+            toolName: "writeFile",
+            input: JSON.stringify({
+              path: `daily-notes/note-${index}.md`,
+              content: `note ${index}`,
+            }),
+          },
+        ],
+        finishReason: finish("tool-calls"),
+        usage: usage(),
+        warnings: [],
+      })),
+    });
+
+    await assert.rejects(
+      runNotesAgent({
+        cwd: root,
+        promptPath: "prompt.md",
+        prompt: "Keep writing notes forever.",
+        allowPath: "./daily-notes/**/*.md",
+        model,
+        maxSteps: 3,
+        timeoutMs: 30_000,
+      }),
+      (error: unknown) => {
+        assert.match(String(error), /Step limit reached \(3 steps\)/);
+        const summary = (error as { summary?: { steps?: number } }).summary;
+        assert.equal(summary?.steps, 3);
+        return true;
+      },
+    );
+  });
+
   it("aborts a stalled run at the timeout", async () => {
     root = await mkdtemp(join(tmpdir(), "bobik-smoke-"));
     await mkdir(join(root, "daily-notes"), { recursive: true });

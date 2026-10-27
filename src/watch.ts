@@ -33,6 +33,8 @@ export interface WatchModeOptions {
   visionModel?: LanguageModel;
   /** Changed/added files must contain this string to trigger a run. */
   trigger?: string;
+  /** Agent loop step limit per run; defaults to MAX_STEPS. */
+  maxSteps?: number;
   /** Run implementation; defaults to runNotesAgent. Tests may wrap it. */
   runAgent?: (options: RunNotesAgentOptions) => Promise<RunSummary>;
   /** Suppression window for agent-written files after a run ends. */
@@ -274,6 +276,9 @@ export async function watchMode(options: WatchModeOptions): Promise<number> {
         ...(options.visionModel ? { visionModel: options.visionModel } : {}),
         signal: abortController.signal,
         onFileWrite: (path) => inFlightWrites.add(path),
+        ...(options.maxSteps !== undefined
+          ? { maxSteps: options.maxSteps }
+          : {}),
         ...(run.initial ? { initialRun: true } : { changedFiles }),
       });
       const text = summary.text.endsWith("\n")

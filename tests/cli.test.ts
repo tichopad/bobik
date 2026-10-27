@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import { allowPathWarning, parseDenyList } from "../src/cli.ts";
+import { allowPathWarning, parseDenyList, parseMaxSteps } from "../src/cli.ts";
 
 const cliPath = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const launcherPath = fileURLToPath(
@@ -64,6 +64,22 @@ describe("parseDenyList", () => {
 
   it("returns an empty list when the flag is absent", () => {
     assert.deepEqual(parseDenyList(undefined), []);
+  });
+});
+
+describe("parseMaxSteps", () => {
+  it("parses a positive integer", () => {
+    assert.equal(parseMaxSteps("40"), 40);
+  });
+
+  it("returns undefined when the flag is absent", () => {
+    assert.equal(parseMaxSteps(undefined), undefined);
+  });
+
+  it("rejects non-numeric, fractional and non-positive values", () => {
+    for (const value of ["abc", "2.5", "0", "-3", ""]) {
+      assert.throws(() => parseMaxSteps(value), /positive integer/);
+    }
   });
 });
 

@@ -61,6 +61,19 @@ describe("compileAllowlist", () => {
     assert.equal(allowlist.matches("/daily-notes/a.md"), true);
   });
 
+  it("matches root-level files for leading globstars", () => {
+    // picomatch does not collapse a leading `/**/` to zero directories, so
+    // without a root-level matcher `./**/*.md` would miss `/note.md`.
+    const allowlist = compileAllowlist("/notes", "./**/*.md");
+
+    assert.equal(allowlist.matches("/note.md"), true);
+    assert.equal(allowlist.matches("/daily-notes/note.md"), true);
+    assert.equal(allowlist.matches("/note.txt"), false);
+
+    const bare = compileAllowlist("/notes", "**/*.md");
+    assert.equal(bare.matches("/note.md"), true);
+  });
+
   it("rejects relative globs that escape cwd", () => {
     assert.throws(() => compileAllowlist("/notes", "../**/*.md"), UsageError);
     assert.throws(

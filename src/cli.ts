@@ -38,6 +38,7 @@ Options:
   --deny <list>         Comma-separated bash command names to block
   --model <id>          Fireworks model ID (default: ${DEFAULT_MODEL})
   --vision-model <id>   Fireworks image-inspection model ID (default: exact --model)
+  --max-steps <n>       Agent loop step limit per run (default: ${MAX_STEPS})
   --watch               Keep watching; re-run when a changed file contains the trigger
   --trigger <string>    String that triggers a watch-mode run (default: ${DEFAULT_TRIGGER})
 
@@ -47,7 +48,7 @@ Environment:
 The API key is read from FIREWORKS_API_KEY or $XDG_CONFIG_HOME/bobik/config.json
 (~/.config/bobik/config.json when XDG_CONFIG_HOME is unset).
 
-Runs are limited to ${MAX_STEPS} steps and ${RUN_TIMEOUT_MS / 60_000} minutes.
+Runs are limited to ${MAX_STEPS} steps by default (--max-steps) and ${RUN_TIMEOUT_MS / 60_000} minutes.
 `;
 
 const runArgs = {
@@ -74,6 +75,10 @@ const runArgs = {
     type: "string",
     description: "Fireworks image-inspection model ID (defaults to --model)",
   },
+  "max-steps": {
+    type: "string",
+    description: "Agent loop step limit per run",
+  },
   watch: {
     type: "boolean",
     description:
@@ -92,6 +97,7 @@ const topLevelArgs = {
   deny: { type: "string" },
   model: { type: "string" },
   "vision-model": { type: "string" },
+  "max-steps": { type: "string" },
   watch: { type: "boolean" },
   trigger: { type: "string" },
 } as const;
@@ -113,6 +119,7 @@ export const runCommandDefinition = defineCommand({
       deny: args.deny,
       model: args.model,
       visionModel: args["vision-model"],
+      maxSteps: args["max-steps"],
       watch: args.watch,
       trigger: args.trigger,
     });
@@ -163,6 +170,7 @@ interface DefaultRunArgs {
   deny?: string;
   model: string;
   visionModel?: string;
+  maxSteps?: string;
   watch?: boolean;
   trigger?: string;
 }
@@ -180,6 +188,7 @@ async function runDefault(args: DefaultRunArgs): Promise<number> {
   if (args.trigger !== undefined && args.trigger.trim() === "") {
     throw new UsageError("--trigger requires a non-empty value.");
   }
+  const maxSteps = parseMaxSteps(args.maxSteps);
 
   const cwd = process.cwd();
   const promptPath = resolve(cwd, args.prompt);
@@ -203,6 +212,7 @@ async function runDefault(args: DefaultRunArgs): Promise<number> {
       deny,
       model,
       ...(visionModel ? { visionModel } : {}),
+      ...(maxSteps !== undefined ? { maxSteps } : {}),
       ...(args.trigger ? { trigger: args.trigger } : {}),
     });
   }
@@ -215,6 +225,7 @@ async function runDefault(args: DefaultRunArgs): Promise<number> {
     deny,
     model,
     ...(visionModel ? { visionModel } : {}),
+    ...(maxSteps !== undefined ? { maxSteps } : {}),
   });
 
   const text = summary.text.endsWith("\n") ? summary.text : `${summary.text}\n`;
@@ -242,6 +253,18 @@ export function parseDenyList(value: string | undefined): string[] {
     .split(",")
     .map((entry) => entry.trim())
     .filter(Boolean);
+}
+
+/** Parse the CLI --max-steps flag into a positive integer step limit. */
+export function parseMaxSteps(value: string | undefined): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new UsageError("--max-steps requires a positive integer.");
+  }
+  return parsed;
 }
 
 /**
@@ -332,6 +355,7 @@ const FLAGS_WITH_VALUES: ReadonlySet<string> = new Set([
   "--deny",
   "--model",
   "--vision-model",
+  "--max-steps",
   "--trigger",
 ]);
 

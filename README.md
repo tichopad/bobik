@@ -53,7 +53,7 @@ run `bobik set-api-key`.
 ## Usage
 
 ```console
-bobik --prompt <path> --allow-path <glob> [--deny "rm,wget"] [--model <id>] [--vision-model <id>]
+bobik --prompt <path> --allow-path <glob> [--deny "rm,wget"] [--model <id>] [--vision-model <id>] [--max-steps <n>]
 bobik --prompt <path> --allow-path <glob> --watch [--trigger <string>]
 bobik set-api-key <key>
 ```
@@ -65,6 +65,7 @@ bobik set-api-key <key>
 | `--deny <list>`       | no       | Comma-separated bash command names to block, e.g. `"rm,wget"`.                                                                                             |
 | `--model <id>`        | no       | Fireworks model ID. Default: `accounts/fireworks/models/deepseek-v4p1-flash-1017`.                                                                         |
 | `--vision-model <id>` | no       | Fireworks model ID for image inspection, using the same API key. Defaults to the exact `--model` selection; no automatic fallback or capability preflight. |
+| `--max-steps <n>`     | no       | Agent loop step limit per run. Default: 25. Applies to one-shot and watch-mode runs alike.                                                                 |
 | `--watch`             | no       | Keep running: watch the allow-path's base directory and re-run the agent when a changed file contains the trigger string.                                  |
 | `--trigger <string>`  | no       | Watch-mode trigger. Default: standalone `#bobik` tag. Custom strings use case-sensitive literal matching. Comments and code are excluded.                  |
 
@@ -117,7 +118,7 @@ are failures; output-limit responses carry a prominent incomplete warning. There
 no Bobik-specific output cap.
 
 Vision requests share the run's five-minute timeout and caller cancellation; the
-25-step limit counts only the outer loop. Their token usage is included in the run
+step limit counts only the outer loop. Their token usage is included in the run
 summary and audit totals (including known usage on failures). An aborted/failed
 provider request may not report usage. Programmatic callers can inject an optional
 AI SDK `LanguageModel` as `visionModel`; omitting it reuses the exact `model` instance.
@@ -179,7 +180,7 @@ Loop guards:
 - A file re-triggers only when its content hash actually changed (in-memory
   only; nothing persists across restarts).
 - Runs are serialized; events arriving during a run coalesce into at most one
-  follow-up run. Every run keeps the usual 25-step / 5-minute limits.
+  follow-up run. Every run keeps the usual step / 5-minute limits.
 - A failed run is retried exactly once after 60 seconds. If the retry also
   fails, Bobik logs "gave up" to stderr and the audit log, and waits for the
   next real edit instead of looping.
@@ -221,8 +222,8 @@ Bobik assumes the prompt is trusted and the model's output is not.
   Dotfiles and dot-directories never match unless the glob explicitly targets
   them. Inside the sandbox, `/` is the working directory, so shell paths are
   virtual and cannot reach the host filesystem outside cwd.
-- **One enforcement point.** The same wrapped filesystem backs all four tools:
-  `bash`, `readFile`, `writeFile`, and `viewMedia`. Image reads inherit the same
+- **One enforcement point.** The same wrapped filesystem backs all five tools:
+  `bash`, `readFile`, `editFile`, `writeFile`, and `viewMedia`. Image reads inherit the same
   virtual paths, allowlist, hidden-file rules, audit-directory protection, and
   symlink safeguards; they never open agent-selected host paths directly.
 - **No network.** The sandbox does not configure networking, so `curl` and
@@ -238,7 +239,8 @@ Bobik assumes the prompt is trusted and the model's output is not.
 - **Audit directory.** Logs live in `.agent-bobik/`. The wrapper hard-denies
   that directory (and everything under it) even if the allow-path glob names it,
   so the sandboxed agent cannot read or list the logs.
-- **Guardrails.** The agent loop stops after 25 steps, each bash command is
+- **Guardrails.** The agent loop stops after 25 steps by default
+  (configurable with `--max-steps`), each bash command is
   limited to 30 seconds, and the whole run is limited to 5 minutes.
 
 The deny list is defense in depth, not the write boundary. It intentionally
@@ -297,4 +299,4 @@ key or network access.
 - Network access inside the sandbox.
 - A build step or bundling.
 - Interactive mode, conversation history, or streaming output.
-- `--max-steps` / `--timeout` flags (the guardrails are fixed for now).
+- A `--timeout` flag (the 5-minute run guardrail is fixed for now).

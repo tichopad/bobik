@@ -119,6 +119,7 @@ describe("buildSystemPrompt", () => {
     });
 
     assert.match(prompt, /readFile/);
+    assert.match(prompt, /editFile/);
     assert.match(prompt, /writeFile/);
     assert.match(prompt, /bash/);
     assert.match(prompt, /one-shot/i);

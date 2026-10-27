@@ -107,6 +107,12 @@ export function compileAllowlist(cwd: string, allowGlob: string): Allowlist {
 
   const pattern = virtualPatternFromRelative(relativePattern);
   const matcher = picomatch(pattern, { dot: false });
+  // picomatch collapses `/**/` to zero directories mid-pattern but not at
+  // the root, so `./**/*.md` would not match `/note.md`. Add a root-level
+  // matcher for that case; otherwise top-level files fail with EACCES.
+  const rootMatcher = pattern.startsWith("/**/")
+    ? picomatch(`/${pattern.slice(4)}`, { dot: false })
+    : undefined;
   const segments = pattern.split("/").filter(Boolean);
   // picomatch resolves backslash escapes while matching, so traversal and
   // existence checks compare real entry names against the unescaped form of
@@ -145,7 +151,8 @@ export function compileAllowlist(cwd: string, allowGlob: string): Allowlist {
     baseDirectory: base,
     matches(path: string): boolean {
       try {
-        return matcher(normalizeVirtualPath(path));
+        const normalized = normalizeVirtualPath(path);
+        return matcher(normalized) || (rootMatcher?.(normalized) ?? false);
       } catch {
         return false;
       }
