@@ -18,6 +18,7 @@ export { DEFAULT_TRIGGER } from "./trigger.ts";
 export const SETTLE_MS = 1_000;
 export const RETRY_DELAY_MS = 60_000;
 export const AWAIT_WRITE_FINISH_MS = 500;
+export const WATCH_DELAY_MS = 60_000;
 
 export interface WatchModeOptions {
   /** Host working directory and sandbox root. */
@@ -33,6 +34,8 @@ export interface WatchModeOptions {
   visionModel?: LanguageModel;
   /** Changed/added files must contain this string to trigger a run. */
   trigger?: string;
+  /** Quiet period after the last relevant change before starting a run. */
+  watchDelayMs?: number;
   /** Agent loop step limit per run; defaults to MAX_STEPS. */
   maxSteps?: number;
   /** Run implementation; defaults to runNotesAgent. Tests may wrap it. */
@@ -59,7 +62,8 @@ interface PendingRun {
 
 /**
  * Watch mode: run the agent once at startup, then re-run it whenever an
- * allowed file changes and contains the trigger string.
+ * allowed file changes and contains the trigger string, after a quiet period
+ * of 60 seconds (configurable via watchDelayMs) since the last relevant change.
  *
  * Guards: agent-written paths are suppressed while a run is in flight plus a
  * short settle window, triggered content is hash-deduplicated, runs are
@@ -74,6 +78,7 @@ export async function watchMode(options: WatchModeOptions): Promise<number> {
   const trigger = options.trigger ?? DEFAULT_TRIGGER;
   const settleMs = options.settleMs ?? SETTLE_MS;
   const retryDelayMs = options.retryDelayMs ?? RETRY_DELAY_MS;
+  const watchDelayMs = options.watchDelayMs ?? WATCH_DELAY_MS;
   const runAgent = options.runAgent ?? runNotesAgent;
   const stdout = options.stdout ?? ((text) => process.stdout.write(text));
   const stderr = options.stderr ?? ((text) => process.stderr.write(text));
@@ -103,6 +108,8 @@ export async function watchMode(options: WatchModeOptions): Promise<number> {
   const retried = new Set<string>();
   let initialRetried = false;
   let retryTimer: NodeJS.Timeout | undefined;
+  let changeTimer: NodeJS.Timeout | undefined;
+  let quietUntil = 0;
   let running = false;
   let stopping = false;
   let exitCode: number | undefined;
@@ -186,6 +193,11 @@ export async function watchMode(options: WatchModeOptions): Promise<number> {
     hashes.set(path, hash);
     pending.deleted.delete(path);
     pending.triggered.add(path);
+    quietUntil = Date.now() + watchDelayMs;
+    if (changeTimer !== undefined) {
+      clearTimeout(changeTimer);
+      changeTimer = undefined;
+    }
     stderr(`bobik: run triggered by ${path}\n`);
     schedule();
   }
@@ -199,6 +211,16 @@ export async function watchMode(options: WatchModeOptions): Promise<number> {
       pending.triggered.size > 0 ||
       (pendingRetry && retryTimer === undefined);
     if (!hasWork) {
+      return;
+    }
+    // Keep the deadline even while a run is in flight: its follow-up waits
+    // only for the remaining quiet period, not a fresh delay after completion.
+    const remaining = quietUntil - Date.now();
+    if (!pending.initial && remaining > 0) {
+      changeTimer ??= setTimeout(() => {
+        changeTimer = undefined;
+        schedule();
+      }, remaining);
       return;
     }
     void executeRun();
@@ -380,6 +402,10 @@ export async function watchMode(options: WatchModeOptions): Promise<number> {
       return;
     }
     sessionResolved = true;
+    if (changeTimer !== undefined) {
+      clearTimeout(changeTimer);
+      changeTimer = undefined;
+    }
     if (retryTimer !== undefined) {
       clearTimeout(retryTimer);
       retryTimer = undefined;

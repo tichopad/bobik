@@ -54,7 +54,7 @@ run `bobik set-api-key`.
 
 ```console
 bobik --prompt <path> --allow-path <glob> [--deny "rm,wget"] [--model <id>] [--vision-model <id>] [--max-steps <n>]
-bobik --prompt <path> --allow-path <glob> --watch [--trigger <string>]
+bobik --prompt <path> --allow-path <glob> --watch [--trigger <string>] [--watch-delay <seconds>]
 bobik set-api-key <key>
 ```
 
@@ -134,6 +134,14 @@ With `--watch`, Bobik runs the agent once at startup (with an explicit "initial
 run, no change set" context), then keeps watching the allow-path's leading
 literal directory recursively. A changed or added file triggers a new run only
 when it contains a ready trigger (`#bobik` by default, set with `--trigger`).
+
+Triggered runs wait until **60 seconds after the last relevant change**, combining
+changes into one run. Set `--watch-delay <seconds>` to change this quiet period
+(fractional seconds are accepted; `0` disables it). Irrelevant or identical-content
+changes do not reset the countdown. Startup remains immediate, and the retry
+delay is unchanged. Changes during a run wait for any remaining quiet period
+before the follow-up starts.
+
 The default matches a standalone, case-sensitive tag followed by a colon,
 whitespace, or end-of-file; `#bobik-draft`, `#bobik/foo`, and `#bobik123` do not
 match. Custom triggers retain case-sensitive literal substring matching.

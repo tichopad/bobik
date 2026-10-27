@@ -13,7 +13,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import { allowPathWarning, parseDenyList, parseMaxSteps } from "../src/cli.ts";
+import {
+  allowPathWarning,
+  parseDenyList,
+  parseMaxSteps,
+  parseWatchDelay,
+} from "../src/cli.ts";
 
 const cliPath = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const launcherPath = fileURLToPath(
@@ -83,6 +88,21 @@ describe("parseMaxSteps", () => {
   });
 });
 
+describe("parseWatchDelay", () => {
+  it("converts seconds to milliseconds, including zero and fractions", () => {
+    assert.equal(parseWatchDelay(undefined), undefined);
+    assert.equal(parseWatchDelay("60"), 60_000);
+    assert.equal(parseWatchDelay("0.25"), 250);
+    assert.equal(parseWatchDelay("0"), 0);
+  });
+
+  it("rejects invalid values and timer overflow", () => {
+    for (const value of ["abc", "", " ", "-1", "Infinity", "NaN", "2147484"]) {
+      assert.throws(() => parseWatchDelay(value), /--watch-delay requires/);
+    }
+  });
+});
+
 describe("allowPathWarning", () => {
   let root: string;
 
@@ -142,6 +162,7 @@ describe("cli", () => {
     assert.match(result.stdout, /Usage:/);
     assert.match(result.stdout, /--allow-path/);
     assert.match(result.stdout, /--vision-model/);
+    assert.match(result.stdout, /--watch-delay/);
     assert.match(result.stdout, /set-api-key/);
   });
 
@@ -150,6 +171,22 @@ describe("cli", () => {
 
     assert.equal(result.code, 0);
     assert.match(result.stdout, /^\d+\.\d+\.\d+/);
+  });
+
+  it("validates --watch-delay before starting a run", async () => {
+    for (const value of [undefined, "invalid", "-1", "Infinity"]) {
+      const result = await runCli([
+        "--prompt",
+        "prompt.md",
+        "--allow-path",
+        "./notes/**/*.md",
+        "--watch",
+        "--watch-delay",
+        ...(value === undefined ? [] : [value]),
+      ]);
+      assert.equal(result.code, 2);
+      assert.match(result.stderr, /--watch-delay requires/);
+    }
   });
 
   it("runs through the published launcher without warnings", async () => {

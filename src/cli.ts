@@ -15,7 +15,7 @@ import {
 import { compileAllowlist } from "./allowlist.ts";
 import { requireApiKey, writeApiKey } from "./config.ts";
 import { RunError, UsageError } from "./errors.ts";
-import { DEFAULT_TRIGGER, watchMode } from "./watch.ts";
+import { DEFAULT_TRIGGER, WATCH_DELAY_MS, watchMode } from "./watch.ts";
 
 export const DEFAULT_MODEL =
   "accounts/fireworks/models/deepseek-v4p1-flash-1017";
@@ -28,7 +28,7 @@ const HELP = `bobik — a single-purpose AI agent for Markdown notes
 
 Usage:
   bobik --prompt <path> --allow-path <glob> [--deny "rm,wget"] [--model <id>] [--vision-model <id>]
-  bobik --prompt <path> --allow-path <glob> --watch [--trigger <string>]
+  bobik --prompt <path> --allow-path <glob> --watch [--trigger <string>] [--watch-delay <seconds>]
   bobik set-api-key <key>
   bobik --help
 
@@ -41,6 +41,7 @@ Options:
   --max-steps <n>       Agent loop step limit per run (default: ${MAX_STEPS})
   --watch               Keep watching; re-run when a changed file contains the trigger
   --trigger <string>    String that triggers a watch-mode run (default: ${DEFAULT_TRIGGER})
+  --watch-delay <seconds> Quiet period after the last relevant change (default: ${WATCH_DELAY_MS / 1000})
 
 Environment:
   FIREWORKS_API_KEY     Overrides the key saved by set-api-key
@@ -89,6 +90,11 @@ const runArgs = {
     default: DEFAULT_TRIGGER,
     description: "String that triggers a watch-mode run",
   },
+  "watch-delay": {
+    type: "string",
+    description:
+      "Seconds of quiet after the last relevant change (default: 60)",
+  },
 } as const;
 
 const topLevelArgs = {
@@ -100,6 +106,7 @@ const topLevelArgs = {
   "max-steps": { type: "string" },
   watch: { type: "boolean" },
   trigger: { type: "string" },
+  "watch-delay": { type: "string" },
 } as const;
 
 export const runCommandDefinition = defineCommand({
@@ -122,6 +129,7 @@ export const runCommandDefinition = defineCommand({
       maxSteps: args["max-steps"],
       watch: args.watch,
       trigger: args.trigger,
+      watchDelay: args["watch-delay"],
     });
   },
 });
@@ -173,6 +181,7 @@ interface DefaultRunArgs {
   maxSteps?: string;
   watch?: boolean;
   trigger?: string;
+  watchDelay?: string;
 }
 
 async function runDefault(args: DefaultRunArgs): Promise<number> {
@@ -189,6 +198,7 @@ async function runDefault(args: DefaultRunArgs): Promise<number> {
     throw new UsageError("--trigger requires a non-empty value.");
   }
   const maxSteps = parseMaxSteps(args.maxSteps);
+  const watchDelayMs = parseWatchDelay(args.watchDelay);
 
   const cwd = process.cwd();
   const promptPath = resolve(cwd, args.prompt);
@@ -214,6 +224,7 @@ async function runDefault(args: DefaultRunArgs): Promise<number> {
       ...(visionModel ? { visionModel } : {}),
       ...(maxSteps !== undefined ? { maxSteps } : {}),
       ...(args.trigger ? { trigger: args.trigger } : {}),
+      ...(watchDelayMs !== undefined ? { watchDelayMs } : {}),
     });
   }
 
@@ -265,6 +276,23 @@ export function parseMaxSteps(value: string | undefined): number | undefined {
     throw new UsageError("--max-steps requires a positive integer.");
   }
   return parsed;
+}
+
+/** Parse seconds into milliseconds; zero disables the watch quiet period. */
+export function parseWatchDelay(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const seconds = Number(value);
+  if (
+    value.trim() === "" ||
+    !Number.isFinite(seconds) ||
+    seconds < 0 ||
+    seconds * 1000 > 2_147_483_647
+  ) {
+    throw new UsageError(
+      "--watch-delay requires non-negative seconds (at most 2147483.647).",
+    );
+  }
+  return seconds * 1000;
 }
 
 /**
@@ -357,6 +385,7 @@ const FLAGS_WITH_VALUES: ReadonlySet<string> = new Set([
   "--vision-model",
   "--max-steps",
   "--trigger",
+  "--watch-delay",
 ]);
 
 function assertFlagValues(rawArgs: string[]): void {

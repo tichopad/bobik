@@ -123,6 +123,7 @@ async function startWatch(
     settleMs: 100,
     retryDelayMs: 100,
     awaitWriteFinishMs: 30,
+    watchDelayMs: 0,
     stdout: () => {},
     stderr: (text) => stderr.push(text),
     ...options.watch,
@@ -177,6 +178,106 @@ describe("watch mode", () => {
     assert.equal(harness.runs[0]?.changedFiles, undefined);
 
     assert.equal(await stopWatch(harness), 0);
+  });
+
+  it("defaults to a 60-second quiet period without delaying startup", async () => {
+    harness = await startWatch({ watch: { watchDelayMs: undefined } });
+    await waitFor(() => harness!.runs.length === 1, "immediate startup");
+    await writeFile(join(harness.root, "daily-notes", "a.md"), "#bobik\n");
+    await waitFor(
+      () => harness!.stderr.some((line) => line.includes("run triggered")),
+      "change queued",
+    );
+    await settle();
+    assert.equal(harness.runs.length, 1);
+    assert.equal(await stopWatch(harness), 0);
+  });
+
+  it("resets the quiet period for relevant changes and coalesces files", async () => {
+    harness = await startWatch({ watch: { watchDelayMs: 700 } });
+    await waitFor(() => harness!.runs.length === 1, "initial run");
+    await writeFile(join(harness.root, "daily-notes", "a.md"), "#bobik a\n");
+    await waitFor(
+      () =>
+        harness!.stderr.filter((line) => line.includes("run triggered"))
+          .length === 1,
+      "first change",
+    );
+    await settle(400);
+    await writeFile(join(harness.root, "daily-notes", "b.md"), "#bobik b\n");
+    await waitFor(
+      () =>
+        harness!.stderr.filter((line) => line.includes("run triggered"))
+          .length === 2,
+      "second change",
+    );
+    await settle(400);
+    assert.equal(harness.runs.length, 1);
+    await waitFor(() => harness!.runs.length === 2, "debounced run");
+    assert.deepEqual(harness.runs[1]?.changedFiles, [
+      { path: "daily-notes/a.md" },
+      { path: "daily-notes/b.md" },
+    ]);
+    await settle();
+    assert.equal(harness.runs.length, 2);
+  });
+
+  it("does not reset the countdown for irrelevant or identical changes", async () => {
+    harness = await startWatch({ watch: { watchDelayMs: 900 } });
+    await waitFor(() => harness!.runs.length === 1, "initial run");
+    const note = join(harness.root, "daily-notes", "a.md");
+    await writeFile(note, "#bobik\n");
+    await waitFor(
+      () => harness!.stderr.some((line) => line.includes("run triggered")),
+      "change queued",
+    );
+    await settle(500);
+    await writeFile(note, "#bobik\n");
+    await writeFile(join(harness.root, "daily-notes", "plain.md"), "no tag");
+    await writeFile(join(harness.root, "outside.md"), "#bobik");
+    await waitFor(() => harness!.runs.length === 2, "original deadline", 700);
+  });
+
+  it("waits for the remaining quiet period after an in-flight run", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    harness = await startWatch({
+      watch: { watchDelayMs: 700 },
+      onGenerate: async (_call, runIndex) => {
+        if (runIndex === 0) await gate;
+        return undefined;
+      },
+    });
+    await waitFor(() => harness!.runs.length === 1, "initial run");
+    try {
+      await writeFile(join(harness.root, "daily-notes", "a.md"), "#bobik\n");
+      await waitFor(
+        () => harness!.stderr.some((line) => line.includes("run triggered")),
+        "queued change",
+      );
+      release();
+      await settle(300);
+      assert.equal(harness.runs.length, 1);
+      await waitFor(() => harness!.runs.length === 2, "quiet follow-up");
+    } finally {
+      release();
+    }
+  });
+
+  it("cancels a debounced request when it becomes a draft", async () => {
+    harness = await startWatch({ watch: { watchDelayMs: 500 } });
+    await waitFor(() => harness!.runs.length === 1, "initial run");
+    const note = join(harness.root, "daily-notes", "draft.md");
+    await writeFile(note, "#bobik ready");
+    await waitFor(
+      () => harness!.stderr.some((line) => line.includes("run triggered")),
+      "queued change",
+    );
+    await writeFile(note, "%% #bobik drafting %%");
+    await settle(800);
+    assert.equal(harness.runs.length, 1);
   });
 
   it("waits for uncommenting and protects mixed ready/draft notes", async () => {
