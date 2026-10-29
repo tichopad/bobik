@@ -1,8 +1,9 @@
 import { jsonSchema, tool } from "ai";
 import type { IFileSystem } from "just-bash";
+import { readFileWithHint } from "./read-file.ts";
 
 interface EditFileOptions {
-  fs: Pick<IFileSystem, "readFile" | "writeFile">;
+  fs: Pick<IFileSystem, "readFile" | "writeFile" | "getAllPaths">;
 }
 
 interface EditFileInput {
@@ -36,7 +37,7 @@ export function createEditFileTool(options: EditFileOptions) {
       if (oldString === newString) {
         throw new Error("oldString and newString must differ.");
       }
-      const content = await options.fs.readFile(path, "utf8");
+      const content = await readFileWithHint(options.fs, path);
       const count = content.split(oldString).length - 1;
       if (count === 0) {
         throw new Error(`oldString not found in ${path}.`);

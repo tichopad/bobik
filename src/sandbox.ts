@@ -3,6 +3,7 @@ import { createBashTool, type BashToolkit } from "bash-tool";
 import { compileAllowlist, type Allowlist } from "./allowlist.ts";
 import { AllowlistFs } from "./allowlist-fs.ts";
 import { createDenyPolicy, type DenyPolicy } from "./deny.ts";
+import { createReadFileTool } from "./read-file.ts";
 
 export interface NotesSandboxOptions {
   /** Host working directory; also the sandbox root. */
@@ -59,7 +60,7 @@ export async function createNotesSandbox(
     },
   });
 
-  const { tools } = await createBashTool({
+  const { tools: bashTools } = await createBashTool({
     sandbox: bash,
     destination: "/",
     onBeforeBashCall: ({ command }) => {
@@ -72,6 +73,14 @@ export async function createNotesSandbox(
       };
     },
   });
+
+  // Replace the generic readFile: a bare ENOENT hides same-name notes that
+  // live in a subdirectory (for example Agent/Memories.md), and the agent
+  // then tends to create a duplicate at the guessed path.
+  const tools = {
+    ...bashTools,
+    readFile: createReadFileTool({ fs }),
+  };
 
   return { tools, bash, fs, allowlist, denyPolicy };
 }
