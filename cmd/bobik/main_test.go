@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -225,5 +226,92 @@ func TestCLIWatchSignals(t *testing.T) {
 				t.Fatal("watch did not stop")
 			}
 		})
+	}
+}
+
+func TestCLIWatchReloadsPromptAndReportsCWDRelativeChanges(t *testing.T) {
+	var count atomic.Int32
+	requests := make(chan string, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Messages []struct{ Role, Content string }
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		for _, msg := range req.Messages {
+			if msg.Role == "user" {
+				select {
+				case requests <- msg.Content:
+				default:
+					t.Error("unexpected extra watch run")
+				}
+				break
+			}
+		}
+		fmt.Fprintf(w, `{"choices":[{"message":{"role":"assistant","content":"run %d"},"finish_reason":"stop"}]}`, count.Add(1))
+	}))
+	defer server.Close()
+	a, cwd, stdout, stderr := cliFixture(t, server)
+	dir := filepath.Join(cwd, "vault")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	signals := make(chan os.Signal, 2)
+	a.signals = signals
+	done := make(chan int, 1)
+	go func() {
+		done <- a.run([]string{"--prompt=prompt", "--allow-path=vault/*.md", "--watch", "--watch-delay=0"})
+	}()
+	stopped := false
+	defer func() {
+		if !stopped {
+			for range 2 {
+				select {
+				case signals <- syscall.SIGTERM:
+				default:
+				}
+			}
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Error("watch did not stop during cleanup")
+			}
+		}
+	}()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	nextRequest := func() string {
+		t.Helper()
+		select {
+		case content := <-requests:
+			return content
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for watch model request")
+			return ""
+		}
+	}
+	if got := nextRequest(); !strings.Contains(got, "initial run") {
+		t.Fatalf("missing initial watch context: %q", got)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, "prompt"), []byte("Reloaded instructions."), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "submission.md"), []byte("#bobik: Ready.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := nextRequest(); !strings.HasPrefix(got, "Reloaded instructions.") || !strings.Contains(got, "vault/submission.md") {
+		t.Fatalf("wrong watch prompt: %q", got)
+	}
+	signals <- syscall.SIGTERM
+	select {
+	case code := <-done:
+		stopped = true
+		if code != exitOK || stdout.String() != "run 1\nrun 2\n" {
+			t.Fatalf("watch exit %d, stdout %q, stderr %q", code, stdout, stderr)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out stopping the watcher")
 	}
 }

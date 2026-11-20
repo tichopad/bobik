@@ -113,6 +113,7 @@ from stdout and stderr; ripgrep's exit `1` means no match.
 | --- | --- |
 | Prompt file | 1 MiB |
 | `readFile` | 128 KiB |
+| Watch classification / mutation safety check | 16 MiB / 32 MiB per note |
 | `viewMedia` input | 10 MiB |
 | Tool argument JSON / result JSON | 1 MiB / 256 KiB |
 | Fireworks response / conversation history | 4 MiB / 8 MiB |
@@ -161,8 +162,8 @@ trigger elsewhere in that note.
 
 Runs are serialized. Bobik suppresses its own writes during the run and for
 about a second afterward. Failed runs retry once after 60 seconds; after a
-second failure Bobik logs that it gave up and waits for another edit. Closing
-or deleting the prompt so it cannot be read stops watch mode. The first
+second failure Bobik logs that it gave up and waits for another edit. If the
+prompt becomes unreadable, watch mode stops. The first
 SIGINT/SIGTERM stops accepting changes and waits for the current run, and a
 second cancels it. Filesystem notifications are not durable across suspension
 or restart.

@@ -147,7 +147,7 @@ func (a app) run(args []string) int {
 	if !o.watch {
 		go cancelOnSignal(ctx, cancel, a.signals)
 		cfg.Prompt = prompt
-		_, err := a.runAgent(ctx, cfg)
+		_, err := a.runAgent(ctx, cfg, false)
 		if err != nil {
 			return exitRunError
 		}
@@ -170,7 +170,7 @@ func (a app) run(args []string) int {
 					runCfg.ChangedFiles = append(runCfg.ChangedFiles, agent.ChangedFile{Path: file.Path, Deleted: file.Deleted})
 				}
 				runCfg.OnWrite = func(path string) { watch.RecordWrite(ctx, path) }
-				return a.runAgent(ctx, runCfg)
+				return a.runAgent(ctx, runCfg, true)
 			},
 		})
 	}()
@@ -200,11 +200,13 @@ func cancelOnSignal(ctx context.Context, cancel context.CancelFunc, signals <-ch
 	}
 }
 
-func (a app) runAgent(ctx context.Context, cfg agent.Config) ([]string, error) {
+func (a app) runAgent(ctx context.Context, cfg agent.Config, watching bool) ([]string, error) {
 	summary, err := agent.Run(ctx, cfg)
 	watch.RecordLogPath(ctx, summary.LogPath)
 	if err != nil {
-		a.fail(exitRunError, err)
+		if !watching {
+			a.fail(exitRunError, err)
+		}
 	} else {
 		text := summary.Text
 		if !strings.HasSuffix(text, "\n") {
