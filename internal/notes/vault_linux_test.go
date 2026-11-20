@@ -81,7 +81,7 @@ func TestVaultDirectoryPolicy(t *testing.T) {
 			t.Errorf("WatchPath(%q) = %v, %v", path, match, descend)
 		}
 	}
-	for _, path := range []string{"home/secret/not-a-note", "home/reference/manual.txt", "home/reference/new/sub/file", ".agent-bobik/log", "home/pinned", "home"} {
+	for _, path := range []string{".", root, "home/secret/not-a-note", "home/reference/manual.txt", "home/reference/new/sub/file", ".agent-bobik/log", "home/pinned", "home"} {
 		for _, mutate := range []func() error{
 			func() error { return s.Write(path, []byte("new")) },
 			func() error { return s.Edit(path, "old", "new") },

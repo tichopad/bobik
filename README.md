@@ -7,7 +7,7 @@ statistics go to **stderr**.
 
 ```sh
 bobik --prompt examples/daily-notes.md --vault ~/Obsidian/MyVault \
-  --hide .obsidian --read-only Archive --pin Projects
+  --hide .obsidian --read-only Archive
 ```
 
 ## Install
@@ -65,7 +65,6 @@ directories.
 | `--vault <dir>` | Required existing directory. Choose only a tree you trust the agent to edit. |
 | `--hide <dir>` | Hide a vault-relative directory's contents. Repeatable. |
 | `--read-only <dir>` | Allow reads but prevent changes under a vault-relative directory. Repeatable. |
-| `--pin <dir>` | Prevent renaming or removing a vault-relative directory itself, not its contents. Repeatable. |
 | `--model <id>` | Fireworks model. Default: `accounts/fireworks/models/deepseek-v4p1-flash-1017`. |
 | `--vision-model <id>` | Image inspection model. Defaults to the exact `--model`; no automatic fallback. |
 | `--max-steps <n>` | Positive step limit per run, default 25. Each run also has a five-minute deadline. |
@@ -83,6 +82,10 @@ Replace `--allow-path` with `--vault`, and `--deny` with explicit directory
 exceptions. `--vault` exposes the entire selected tree, including dotfiles
 unless hidden. If your old glob targeted only a small part of the vault,
 point `--vault` at that subdirectory instead of the full vault.
+
+Remove `--pin` from existing commands. The vault root is already protected from
+moves and removal, but ordinary writable subdirectories can no longer be
+protected individually while keeping their contents writable.
 
 ## File and shell boundaries
 

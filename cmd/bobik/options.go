@@ -33,7 +33,6 @@ Options:
   --vault <directory>      Live notes directory (required)
   --hide <directory>       Hide a vault-relative directory (repeatable)
   --read-only <directory>  Allow reading but not writing (repeatable)
-  --pin <directory>        Prevent moving or deleting the directory itself (repeatable)
   --model <id>             Fireworks model (default: ` + defaultModel + `)
   --vision-model <id>      Image inspection model (defaults to --model)
   --max-steps <n>          Step limit (default: 25)
@@ -60,7 +59,7 @@ func parseOptions(args []string) (options, error) {
 	flags.SetOutput(io.Discard)
 	flags.StringVar(&o.prompt, "prompt", "", "")
 	flags.StringVar(&o.vault, "vault", "", "")
-	for _, mode := range []notes.Mode{notes.Hide, notes.ReadOnly, notes.Pin} {
+	for _, mode := range []notes.Mode{notes.Hide, notes.ReadOnly} {
 		flags.Func(string(mode), "", func(path string) error {
 			if strings.TrimSpace(path) == "" || strings.HasPrefix(path, "--") {
 				return fmt.Errorf("--%s requires a vault-relative directory", mode)
@@ -82,6 +81,8 @@ func parseOptions(args []string) (options, error) {
 			return o, errors.New("--allow-path was removed; select a writable directory with --vault")
 		case "--deny":
 			return o, errors.New("--deny was removed; use --hide or --read-only for vault directories")
+		case "--pin", "-pin":
+			return o, errors.New("--pin was removed; the vault root is already protected from moves and removal")
 		}
 	}
 	if err := flags.Parse(args); err != nil {

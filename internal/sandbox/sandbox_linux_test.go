@@ -179,6 +179,7 @@ func TestBubblewrap(t *testing.T) {
 			[[ $PWD == /notes && ! -v BOBIK_SANDBOX_TEST_SECRET ]]
 			[[ ! -e %[1]q && ! -e /etc/passwd && ! -e /proc/self ]]
 			[[ ! -e project/hidden/link.md && ! -e project/hidden/key && ! -e .agent-bobik/state ]]
+			if mv /notes /moved 2>/dev/null; then exit 95; fi
 			if (printf nope >>project/readonly/keep) 2>/dev/null; then exit 90; fi
 			if (mv project moved) 2>/dev/null; then exit 91; fi
 			if (mv project/pinned project/moved || rmdir project/pinned) 2>/dev/null; then exit 92; fi

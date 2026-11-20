@@ -102,6 +102,9 @@ func TestRunOptions(t *testing.T) {
 	}{
 		{[]string{"--deny", "rm"}, "was removed"},
 		{[]string{"--deny=rm"}, "was removed"},
+		{[]string{"--pin", "Projects"}, "--pin was removed"},
+		{[]string{"--pin=Projects"}, "--pin was removed"},
+		{[]string{"-pin", "Projects"}, "--pin was removed"},
 		{[]string{"--trigger= "}, "--trigger"},
 		{[]string{"--watch-delay=NaN"}, "--watch-delay"},
 		{[]string{"--watch-delay=-1"}, "--watch-delay"},
@@ -121,13 +124,12 @@ func TestRunOptions(t *testing.T) {
 func TestRepeatableVaultRules(t *testing.T) {
 	o, err := parseOptions([]string{
 		"--prompt", "prompt.md", "--vault", "vault", "--hide", ".obsidian",
-		"--read-only=Archive", "--hide", "Private Notes", "--pin", "Projects",
+		"--read-only=Archive", "--hide", "Private Notes",
 	})
 	want := []notes.Rule{
 		{Path: ".obsidian", Mode: notes.Hide},
 		{Path: "Archive", Mode: notes.ReadOnly},
 		{Path: "Private Notes", Mode: notes.Hide},
-		{Path: "Projects", Mode: notes.Pin},
 	}
 	if err != nil || o.vault != "vault" || !slices.Equal(o.rules, want) {
 		t.Fatalf("options %+v: %v", o, err)
