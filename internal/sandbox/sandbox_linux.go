@@ -14,6 +14,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // Source is the trusted note policy adapter. Walk synchronously visits eligible
@@ -154,7 +156,7 @@ func launch(ctx context.Context, profile runtimeProfile, staged, command string)
 		"--", "/bin/bash", "--noprofile", "--norc", "-c", command)
 
 	var stdout, stderr cappedOutput
-	cmd := exec.CommandContext(ctx, profile.prlimit, args...)
+	cmd := exec.Command(profile.prlimit, args...)
 	cmd.Env = []string{"LC_ALL=C"}
 	cmd.Dir = "/"
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -163,22 +165,18 @@ func launch(ctx context.Context, profile runtimeProfile, staged, command string)
 	// group killable until Bash has installed Bubblewrap's parent-death
 	// signal. Bash is PID 1, so Linux tears down its namespace on its exit.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	cmd.Cancel = func() error {
-		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		if errors.Is(err, syscall.ESRCH) {
-			return os.ErrProcessDone
-		}
-		return err
-	}
 	cmd.WaitDelay = time.Second
 	// Linux ties the child parent-death signal to the spawning OS thread.
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 	if err := cmd.Start(); err != nil {
 		return result, executionError(ctx, err)
 	}
 	_ = statusWriter.Close()
-	waitErr := cmd.Wait()
+	waitErr := waitForGroup(ctx, cmd)
 	result.Stdout, result.Stderr = stdout.String(), stderr.String()
 	result.StdoutTruncated, result.StderrTruncated = stdout.truncated, stderr.truncated
 	if ctxErr := ctx.Err(); ctxErr != nil {
@@ -197,6 +195,36 @@ func launch(ctx context.Context, profile runtimeProfile, staged, command string)
 	}
 	result.ExitCode = exitCode
 	return result, nil
+}
+
+func waitForGroup(ctx context.Context, cmd *exec.Cmd) error {
+	killGroup := func() {
+		_ = unix.Kill(-cmd.Process.Pid, unix.SIGKILL)
+	}
+	killed := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		killGroup()
+		close(killed)
+	})
+
+	// Observe exit without reaping the leader. While the PID is still
+	// reserved, stop the cancellation hook and clean up any leftover setup
+	// processes. A delayed group kill must never hit a recycled ID.
+	var info unix.Siginfo
+	var observeErr error
+	for {
+		observeErr = unix.Waitid(unix.P_PID, cmd.Process.Pid, &info, unix.WEXITED|unix.WNOWAIT, nil)
+		if !errors.Is(observeErr, unix.EINTR) {
+			break
+		}
+	}
+	if !stop() {
+		<-killed
+	}
+	if observeErr == nil {
+		killGroup()
+	}
+	return errors.Join(observeErr, cmd.Wait())
 }
 
 func executionError(ctx context.Context, cause error) error {

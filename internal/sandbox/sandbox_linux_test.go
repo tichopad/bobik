@@ -1,12 +1,15 @@
 package sandbox
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -55,6 +58,43 @@ func TestCappedOutput(t *testing.T) {
 		if out.Len() != maxOutput || out.truncated != (size != maxOutput) {
 			t.Fatalf("length = %d, truncated = %t after write of %d", out.Len(), out.truncated, size)
 		}
+	}
+}
+
+// Exercise the process-group wait even on hosts that prohibit Bubblewrap.
+func TestWaitForGroupCancelsDescendants(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	cmd := exec.Command("/bin/bash", "-c", `/bin/sleep 30 & printf '%s\n' "$!"; wait`)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.WaitDelay = time.Second
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	line, err := bufio.NewReader(stdout).ReadString('\n')
+	cancel()
+	var killed *exec.ExitError
+	if err := waitForGroup(ctx, cmd); !errors.As(err, &killed) {
+		t.Fatalf("waitForGroup = %v, want runner killed", err)
+	}
+	if err != nil || strings.TrimSpace(line) == "" {
+		t.Fatalf("descendant pid = %q, %v", line, err)
+	}
+	pid := strings.TrimSpace(line)
+	deadline := time.Now().Add(time.Second)
+	for {
+		cmdline, err := os.ReadFile(filepath.Join("/proc", pid, "cmdline"))
+		if errors.Is(err, os.ErrNotExist) || err == nil && len(cmdline) == 0 {
+			break
+		}
+		if err != nil || time.Now().After(deadline) {
+			t.Fatalf("descendant %s survived cancellation: %q, %v", pid, cmdline, err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
