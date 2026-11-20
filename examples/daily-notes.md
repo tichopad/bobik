@@ -5,8 +5,8 @@ You are running in a directory of daily notes named
 
 Carry yesterday's unfinished backlog into today's note.
 
-1. Determine today's and yesterday's dates. Use the local date/time in your
-   system prompt; run `date` if you need to confirm it. Daily note filenames are
+1. Determine today's and yesterday's dates from the local date/time supplied
+   with the run. Daily note filenames are
    `daily-notes/YYYY-MM-DD.md`.
 2. Read yesterday's daily note. If it does not exist, stop and say so in one
    sentence. Do not create a note in that case.
@@ -19,7 +19,9 @@ Carry yesterday's unfinished backlog into today's note.
    - Keep the item text intact, including any existing carryover marker.
 6. Determine each item's carry-over age: the number of consecutive daily notes,
    ending with yesterday, in which that same unfinished item appears. Search the
-   previous daily notes with `grep` rather than guessing.
+   previous daily notes with `grep` or `rg` rather than guessing. Bash runs
+   from the allowed notes directory; typed file paths are relative to the
+   original working directory.
 7. If an item's age is greater than 3 days, append a marker to the copied item:
    ` 🔁 (<age> days)`. If the item already has a marker, update it to the new
    age instead of adding a second marker. Items aged 3 days or fewer get no

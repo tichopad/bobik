@@ -1,0 +1,44 @@
+name: Go
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Install sandbox runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap ripgrep util-linux
+          # Only on the disposable runner: Ubuntu 24.04 restricts unprivileged
+          # user namespaces by default. Test the real non-setuid profile.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: test -z "$(gofmt -l cmd internal)"
+      - run: go vet ./...
+      - run: go test ./...
+        env:
+          BOBIK_REQUIRE_SANDBOX: "1"
+      - run: go test -race ./...
+      - run: CGO_ENABLED=0 go build -trimpath -o dist/bobik ./cmd/bobik
+      - run: dist/bobik check-sandbox
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bobik-linux-${{ matrix.arch }}
+          path: dist/bobik
+          if-no-files-found: error
