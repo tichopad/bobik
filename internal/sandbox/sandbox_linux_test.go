@@ -11,21 +11,20 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-	"testing/fstest"
 	"time"
 )
 
-func TestRunChecksInputBeforeWalking(t *testing.T) {
-	source := sourceStub{}
-	if _, err := Run(t.Context(), source, strings.Repeat(" ", maxCommand+1)); !errors.Is(err, ErrLimit) {
+func TestRunChecksInputBeforeSetup(t *testing.T) {
+	vault := t.TempDir()
+	if _, err := Run(t.Context(), vault, nil, strings.Repeat(" ", maxCommand+1)); !errors.Is(err, ErrLimit) {
 		t.Fatalf("oversize command: %v", err)
 	}
-	if _, err := Run(t.Context(), source, "printf '\x00'"); err == nil {
+	if _, err := Run(t.Context(), vault, nil, "printf '\x00'"); err == nil {
 		t.Fatal("accepted a NUL in command")
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if _, err := Run(ctx, source, "printf ignored"); !errors.Is(err, context.Canceled) {
+	if _, err := Run(ctx, vault, nil, "printf ignored"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled Run: %v", err)
 	}
 }
@@ -41,7 +40,7 @@ func TestLaunchFailsClosed(t *testing.T) {
 		{"launcher succeeds without running shell", "/usr/bin/true"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := launch(t.Context(), runtimeProfile{prlimit: tc.path}, dir, "printf wrong")
+			result, err := launch(t.Context(), runtimeProfile{prlimit: tc.path}, notesProfile{}, "printf wrong")
 			if !errors.Is(err, ErrUnavailable) || result.ExitCode != -1 || result.Stdout != "" {
 				t.Fatalf("launch = %+v, %v; want no shell run and ErrUnavailable", result, err)
 			}
@@ -58,6 +57,30 @@ func TestCappedOutput(t *testing.T) {
 		if out.Len() != maxOutput || out.truncated != (size != maxOutput) {
 			t.Fatalf("length = %d, truncated = %t after write of %d", out.Len(), out.truncated, size)
 		}
+	}
+}
+
+func TestBootstrapKeepsTheCommandOutOfArguments(t *testing.T) {
+	command := "  # a leading comment\n" + `
+	[[ ! -v _bobik_command && $# == 0 ]] || exit 99
+	if IFS= read -r extra; then exit 98; fi
+	printf '%s\n' 'a "quote" and a backslash \'
+	printf '%s' '  last line  '`
+	bash, err := systemExecutable("bash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bash, "--noprofile", "--norc", "-c", bootstrap)
+	cmd.Stdin = strings.NewReader(command + "\x00")
+	if out, err := cmd.CombinedOutput(); err != nil || string(out) != "a \"quote\" and a backslash \\\n  last line  " {
+		t.Fatalf("bootstrap = %q, %v", out, err)
+	}
+	cmd = exec.Command(bash, "--noprofile", "--norc", "-c", bootstrap)
+	cmd.Stdin = strings.NewReader("printf leaked")
+	out, err := cmd.CombinedOutput()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 125 || len(out) != 0 {
+		t.Fatalf("incomplete command escaped bootstrap = %q, %v", out, err)
 	}
 }
 
@@ -102,8 +125,9 @@ func TestWaitForGroupCancelsDescendants(t *testing.T) {
 // skips a failure, including namespace restrictions that only appear under the
 // intended service user, AppArmor policy, or container.
 func TestBubblewrap(t *testing.T) {
+	vault := t.TempDir()
 	if err := Preflight(t.Context()); err != nil {
-		result, runErr := Run(t.Context(), &fixtureSource{}, "printf wrong")
+		result, runErr := Run(t.Context(), vault, nil, "printf wrong")
 		if !errors.Is(runErr, ErrUnavailable) || result.ExitCode != -1 || result.Stdout != "" {
 			t.Fatalf("failed production profile did not fail closed: result=%+v err=%v; preflight: %v", result, runErr, err)
 		}
@@ -112,55 +136,74 @@ func TestBubblewrap(t *testing.T) {
 		}
 		t.Skip(err)
 	}
-	t.Run("read-only search", func(t *testing.T) {
+	t.Run("live vault and mount exceptions", func(t *testing.T) {
+		for _, tool := range []string{"cat", "ln", "mkdir", "mkfifo", "mv", "rm", "rmdir"} {
+			if _, err := systemExecutable(tool); err != nil {
+				t.Skipf("optional test command %s unavailable: %v", tool, err)
+			}
+		}
 		t.Setenv("BOBIK_SANDBOX_TEST_SECRET", "oracle")
-		temp := t.TempDir()
-		t.Setenv("TMPDIR", temp)
-		host := filepath.Join(temp, "excluded.md")
+		host := filepath.Join(t.TempDir(), "excluded.md")
 		if err := os.WriteFile(host, []byte("needle in excluded host file\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		source := &fixtureSource{files: fstest.MapFS{
-			"project/note.md":   {Data: []byte("needle in note\n")},
-			"project/other.md":  {Data: []byte("ordinary text\n")},
-			"project/link.md":   {Mode: os.ModeSymlink, Data: []byte(host)},
-			"project/socket.md": {Mode: os.ModeSocket},
-		}}
+		for _, name := range []string{"project", "project/readonly", "project/hidden", "project/pinned", ".agent-bobik"} {
+			if err := os.Mkdir(filepath.Join(vault, name), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, name := range []string{"project/note.md", "project/readonly/keep", "project/hidden/key", ".agent-bobik/state", "delete.md"} {
+			if err := os.WriteFile(filepath.Join(vault, name), []byte("needle in note\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Symlink(host, filepath.Join(vault, "project/hidden/link.md")); err != nil {
+			t.Fatal(err)
+		}
+		rules := []Mount{{".agent-bobik", Hide}, {"project/hidden", Hide}, {"project/pinned", Pin}, {"project/readonly", ReadOnly}}
 		command := fmt.Sprintf(`
 			set -eo pipefail
 			[[ $PWD == /notes && ! -v BOBIK_SANDBOX_TEST_SECRET ]]
-			[[ ! -e %[1]q && ! -e /etc/passwd && ! -e /proc/self && ! -e /bin/sh ]]
-			[[ ! -e project/link.md && ! -e project/socket.md ]]
-			if (printf nope >>project/note.md) 2>/dev/null; then exit 90; fi
-			if (printf nope >new.md) 2>/dev/null; then exit 91; fi
-			if (printf nope >/runtime/new) 2>/dev/null; then exit 92; fi
-			[[ $(rg -l needle) == project/note.md ]]
-			rg --color never --no-heading --with-filename needle | grep needle
+			[[ ! -e %[1]q && ! -e /etc/passwd && ! -e /proc/self ]]
+			[[ ! -e project/hidden/link.md && ! -e project/hidden/key && ! -e .agent-bobik/state ]]
+			if (printf nope >>project/readonly/keep) 2>/dev/null; then exit 90; fi
+			if (mv project moved) 2>/dev/null; then exit 91; fi
+			if (mv project/pinned project/moved || rmdir project/pinned) 2>/dev/null; then exit 92; fi
+			if (printf nope >/usr/lib/bobik-file) 2>/dev/null; then exit 93; fi
+			if (ln project/note.md project/alias || ln -s %[1]q symlink || mkfifo fifo) 2>/dev/null; then exit 94; fi
+			rm delete.md
+			mkdir new-dir
+			printf new >new-dir/new.md
+			printf live >project/pinned/note.md
+			cat project/pinned/note.md
 			printf diagnostic >&2`, host)
-		result, err := Run(t.Context(), source, command)
-		if err != nil || result.ExitCode != 0 || result.Stdout != "project/note.md:needle in note\n" || result.Stderr != "diagnostic" {
+		result, err := Run(t.Context(), vault, rules, command)
+		if err != nil || result.ExitCode != 0 || result.Stdout != "live" || result.Stderr != "diagnostic" {
 			t.Fatalf("Run = %+v, %v", result, err)
 		}
-		entries, err := os.ReadDir(temp)
-		if err != nil || len(entries) != 1 || entries[0].Name() != "excluded.md" {
-			t.Fatalf("staging directory was not cleaned up: %v, %v", entries, err)
+		reopened, err := os.ReadFile(filepath.Join(vault, "new-dir", "new.md"))
+		if err != nil || string(reopened) != "new" {
+			t.Fatalf("live write: %q, %v", reopened, err)
+		}
+		if _, err := os.Stat(filepath.Join(vault, "delete.md")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("allowed file was not deleted: %v", err)
 		}
 	})
 	t.Run("exit one is a result", func(t *testing.T) {
-		got, err := Run(t.Context(), &fixtureSource{}, "rg -F nonmatch <<< match")
+		got, err := Run(t.Context(), t.TempDir(), nil, "exit 1")
 		if err != nil || got.ExitCode != 1 || got.Stdout != "" || got.Stderr != "" {
 			t.Fatalf("Run = %+v, %v", got, err)
 		}
 	})
 	t.Run("socket denied", func(t *testing.T) {
-		got, err := Run(t.Context(), &fixtureSource{}, "printf '' >/dev/tcp/127.0.0.1/12345")
+		got, err := Run(t.Context(), t.TempDir(), nil, "printf '' >/dev/tcp/127.0.0.1/12345")
 		if err != nil || got.ExitCode == 0 || !strings.Contains(got.Stderr, "Operation not permitted") {
 			t.Fatalf("local socket was not denied: %+v, %v", got, err)
 		}
 	})
 	t.Run("both streams drain", func(t *testing.T) {
 		command := fmt.Sprintf(`printf '%%0%dd' 0; printf '%%0%dd' 0 >&2; exit 4`, maxOutput+1, maxOutput+2)
-		got, err := Run(t.Context(), &fixtureSource{}, command)
+		got, err := Run(t.Context(), t.TempDir(), nil, command)
 		if err != nil || got.ExitCode != 4 || len(got.Stdout) != maxOutput || len(got.Stderr) != maxOutput ||
 			!got.StdoutTruncated || !got.StderrTruncated {
 			t.Fatalf("output: exit=%d stdout=%d/%t stderr=%d/%t err=%v",
@@ -174,7 +217,7 @@ func TestBubblewrap(t *testing.T) {
 		command := "(/bin/bash -c 'exec -a \"$1\" /bin/bash -c \"while :; do :; done\"' bash " + marker + ") & wait"
 		done := make(chan error, 1)
 		go func() {
-			_, err := Run(ctx, &fixtureSource{}, command)
+			_, err := Run(ctx, t.TempDir(), nil, command)
 			done <- err
 		}()
 		deadline := time.Now().Add(3 * time.Second)

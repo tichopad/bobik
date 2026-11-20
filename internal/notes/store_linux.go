@@ -1,11 +1,10 @@
 //go:build linux
 
-// Package notes provides an allowlisted view of regular notes beneath a
-// working directory. Paths are resolved with Linux openat2, without fallback.
+// Package notes provides a policy-filtered view of regular files in a vault.
+// Paths are resolved with Linux openat2, without fallback.
 package notes
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -15,39 +14,76 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
-	"time"
 	"unicode/utf8"
 
+	"github.com/tichopad/bobik/internal/audit"
 	"golang.org/x/sys/unix"
 )
 
-// Store pins the CWD used for tool paths. Its methods are safe for concurrent
+// Store pins the vault root used for tool paths. Its methods are safe for concurrent
 // use. Changes by programs outside Store aren't governed by its mutation lock.
 type Store struct {
 	policy policy
 
-	mu       sync.Mutex // guards configuration, fd lifetime, and mutations
-	root     *os.File
-	excluded []string
-	trigger  string
+	mu      sync.Mutex // guards the trigger, fd lifetime, and mutations
+	root    *os.File
+	trigger string
 }
 
-func Open(pattern, cwd string) (*Store, error) {
-	p, err := compilePolicy(pattern, cwd)
+// NewVault opens an existing vault, validates its rules, and reserves the audit directory.
+func NewVault(root string, rules []Rule) (*Store, error) {
+	p, err := compileVault(root, rules)
 	if err != nil {
 		return nil, err
 	}
-	fd, err := unix.Openat2(unix.AT_FDCWD, p.cwd, &unix.OpenHow{
+	fd, err := unix.Openat2(unix.AT_FDCWD, p.root, &unix.OpenHow{
 		Flags:   unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC,
 		Resolve: unix.RESOLVE_NO_SYMLINKS,
 	})
 	if err != nil {
-		return nil, pathError("open working directory (requires Linux openat2)", p.cwd, err)
+		return nil, pathError("open vault root (requires Linux openat2)", p.root, err)
 	}
-	return &Store{policy: p, root: os.NewFile(uintptr(fd), p.cwd), trigger: DefaultTrigger}, nil
+	f := os.NewFile(uintptr(fd), p.root)
+	seen := make(map[fileID]string, len(p.dirs))
+	validate := func(dir string, create bool) error {
+		probe, err := openAt(fd, dir, unix.O_PATH|unix.O_DIRECTORY, 0)
+		if create && errors.Is(err, fs.ErrNotExist) {
+			if err := unix.Mkdirat(fd, dir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+				return pathError("reserve audit directory", filepath.Join(p.root, dir), err)
+			}
+			probe, err = openAt(fd, dir, unix.O_PATH|unix.O_DIRECTORY, 0)
+		}
+		if err != nil {
+			return fmt.Errorf("%w: invalid vault rule directory %q: %w", ErrNotAllowed, dir, err)
+		}
+		var st unix.Stat_t
+		err = unix.Fstat(int(probe.Fd()), &st)
+		probe.Close()
+		if err != nil {
+			return pathError("stat vault rule", dir, err)
+		}
+		id := identity(st)
+		if prior, ok := seen[id]; ok {
+			return fmt.Errorf("%w: vault rules %q and %q alias the same directory", ErrNotAllowed, prior, dir)
+		}
+		seen[id] = dir
+		return nil
+	}
+	for _, rule := range p.rules() {
+		if rule.Path != audit.Directory {
+			if err := validate(rule.Path, false); err != nil {
+				_ = f.Close()
+				return nil, err
+			}
+		}
+	}
+	if err := validate(audit.Directory, true); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return &Store{policy: p, root: f, trigger: DefaultTrigger}, nil
 }
 
 func (s *Store) Close() error {
@@ -62,9 +98,13 @@ func (s *Store) Close() error {
 }
 
 // Base is the absolute directory that anchors the filtered walk and watch.
-// Relative paths passed to the typed tools are relative to CWD, not Base.
 func (s *Store) Base() string {
-	return filepath.Join(s.policy.cwd, s.policy.base)
+	return s.policy.root
+}
+
+// Rules returns a sorted copy of the effective directory rules.
+func (s *Store) Rules() []Rule {
+	return s.policy.rules()
 }
 
 func (s *Store) SetTrigger(trigger string) {
@@ -73,69 +113,128 @@ func (s *Store) SetTrigger(trigger string) {
 	s.trigger = trigger
 }
 
-// WatchPath reports lexical file eligibility and whether the watcher should
-// look for descendants. It also works for missing paths (e.g. on deletion).
-// It does not validate an inode; watcher reads still have to go through Read.
+// WatchPath reports Markdown eligibility and whether the watcher should look
+// for descendants. Watcher reads must still go through Read.
 func (s *Store) WatchPath(path string) (matches, descends bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.root == nil {
 		return false, false
 	}
-	// Watch paths, like Walk paths, are relative to Base unless absolute.
-	if !filepath.IsAbs(path) {
-		rel, err := relativePath(s.Base(), path)
-		if err != nil {
-			return false, false
-		}
-		path = filepath.Join(s.Base(), rel)
-	}
-	rel, err := relativePath(s.policy.cwd, path)
-	if err != nil || reserved(rel, s.excluded) {
+	rel, err := relativePath(s.policy.root, path)
+	if err != nil || s.policy.hidden(rel) {
 		return false, false
 	}
-	return s.policy.candidates(rel)
-}
-
-// SetAuditPath adds an audit file or directory to the exclusions. The default
-// .agent-bobik directory is reserved regardless of this setting.
-func (s *Store) SetAuditPath(path string) error { return s.Exclude(path) }
-
-// Exclude hides a CWD-relative or absolute path and any descendants, including
-// from walks and hints. Absolute paths outside CWD are already excluded.
-func (s *Store) Exclude(path string) error {
-	if path == "" {
-		return nil
+	if rel != "." && (access{s.policy, int(s.root.Fd())}).checkAliases(rel, false) != nil {
+		return false, false
 	}
-	if filepath.IsAbs(path) && !strings.ContainsRune(path, 0) {
-		rel, err := filepath.Rel(s.policy.cwd, path)
-		if err == nil && (rel == ".." || strings.HasPrefix(rel, "../")) {
-			return nil
-		}
-	}
-	rel, err := relativePath(s.policy.cwd, path)
-	if err != nil {
-		return err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.root == nil {
-		return fs.ErrClosed
-	}
-	if reserved(rel, s.excluded) {
-		return nil
-	}
-	s.excluded = slices.DeleteFunc(s.excluded, func(existing string) bool {
-		return beneath(existing, rel)
-	})
-	s.excluded = append(s.excluded, rel)
-	return nil
+	return strings.EqualFold(filepath.Ext(rel), ".md"), true
 }
 
 type access struct {
 	policy
-	fd       int
-	excluded []string
+	fd int
+}
+
+type fileID struct {
+	dev uint64
+	ino uint64
+}
+
+func identity(st unix.Stat_t) fileID {
+	return fileID{uint64(st.Dev), st.Ino}
+}
+
+type resolvedFile struct {
+	id fileID
+	fd int
+}
+
+func (f resolvedFile) close() {
+	if f.fd >= 0 {
+		_ = unix.Close(f.fd)
+	}
+}
+
+func (a access) resolve(path string) (resolvedFile, error) {
+	fd, err := unix.Openat2(a.fd, path, &unix.OpenHow{
+		Flags: unix.O_PATH | unix.O_CLOEXEC, Resolve: resolveNotes,
+	})
+	if err != nil {
+		return resolvedFile{fd: -1}, err
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		_ = unix.Close(fd)
+		return resolvedFile{fd: -1}, err
+	}
+	return resolvedFile{identity(st), fd}, nil
+}
+
+func (a access) checkAliases(path string, mutate bool) error {
+	return a.policy.checkAliases(path, mutate, a.resolve)
+}
+
+// Only walk branches with rules. Each such branch has a rule at its root
+// because ancestors of configured paths are automatically pinned.
+func (p policy) checkAliases(path string, mutate bool, lookup func(string) (resolvedFile, error)) error {
+	current, prefix := ".", ""
+	for part := range strings.SplitSeq(path, "/") {
+		children := p.children[current]
+		if len(children) == 0 {
+			return nil
+		}
+		prefix = filepath.Join(prefix, part)
+		next, err := p.matchAlias(prefix, children, mutate, prefix == path, lookup)
+		if err != nil {
+			return err
+		}
+		if next == "" {
+			return nil
+		}
+		current = next
+	}
+	return nil
+}
+
+func (p policy) matchAlias(prefix string, children []string, mutate, terminal bool, lookup func(string) (resolvedFile, error)) (string, error) {
+	entry, pathErr := lookup(prefix)
+	defer entry.close()
+	missing := errors.Is(pathErr, fs.ErrNotExist)
+	if missing && !mutate {
+		return "", nil
+	}
+	if pathErr != nil && !missing {
+		return "", pathErr
+	}
+	next := ""
+	for _, rule := range children {
+		id, err := entry.id, pathErr
+		if rule != prefix {
+			other, lookupErr := lookup(rule)
+			id, err = other.id, lookupErr
+			other.close()
+		}
+		if errors.Is(err, fs.ErrNotExist) {
+			if missing {
+				// Without either inode, a new name may alias the rule.
+				return "", fmt.Errorf("%w: cannot create beside missing protected directory %q", ErrNotAllowed, rule)
+			}
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		if missing || entry.id != id {
+			continue
+		}
+		mode := p.dirs[rule]
+		if next != "" || mode == Hide || mutate && (mode == ReadOnly || mode == Pin && terminal) {
+			return "", ErrNotAllowed
+		}
+		next = rule
+	}
+	return next, nil
 }
 
 func (s *Store) snapshot() (access, error) {
@@ -148,16 +247,15 @@ func (s *Store) snapshot() (access, error) {
 	if err != nil {
 		return access{}, err
 	}
-	return access{s.policy, fd, slices.Clone(s.excluded)}, nil
+	return access{s.policy, fd}, nil
 }
 
 func (a access) allowedPath(path string) (string, error) {
-	rel, err := relativePath(a.cwd, path)
+	rel, err := relativePath(a.root, path)
 	if err != nil {
 		return "", err
 	}
-	matches, _ := a.candidates(rel)
-	if !matches || reserved(rel, a.excluded) {
+	if rel == "." || a.hidden(rel) {
 		return "", ErrNotAllowed
 	}
 	return rel, nil
@@ -229,20 +327,9 @@ func readAt(dir int, path string, limit int64) ([]byte, unix.Stat_t, error) {
 	return data, st, err
 }
 
-// Read behaves like ReadRaw and adds a bounded same-name hint for missing
-// files when possible.
+// Read returns the bytes of an eligible regular file without truncation.
+// A negative limit disables the byte limit; zero permits only an empty file.
 func (s *Store) Read(path string, limit int64) ([]byte, error) {
-	return s.read(path, limit, true)
-}
-
-// ReadRaw returns the bytes of an eligible regular file without truncation
-// or a directory search. A negative limit disables the byte limit; zero
-// permits only an empty file. A missing eligible path wraps fs.ErrNotExist.
-func (s *Store) ReadRaw(path string, limit int64) ([]byte, error) {
-	return s.read(path, limit, false)
-}
-
-func (s *Store) read(path string, limit int64, hint bool) ([]byte, error) {
 	a, err := s.snapshot()
 	if err != nil {
 		return nil, pathError("read", path, err)
@@ -252,167 +339,14 @@ func (s *Store) read(path string, limit int64, hint bool) ([]byte, error) {
 	if err != nil {
 		return nil, pathError("read", path, err)
 	}
+	if err := a.checkAliases(rel, false); err != nil {
+		return nil, pathError("read", path, err)
+	}
 	data, _, err := readAt(a.fd, rel, limit)
 	if err != nil {
-		err = pathError("read", path, err)
-		if hint {
-			err = a.hint(path, err)
-		}
-		return nil, err
+		return nil, pathError("read", path, err)
 	}
 	return data, nil
-}
-
-const (
-	maxHints       = 5
-	maxHintEntries = 10_000
-	hintTimeout    = 100 * time.Millisecond
-)
-
-func (a access) hint(path string, err error) error {
-	if !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), hintTimeout)
-	defer cancel()
-	name := filepath.Base(path)
-	var matches []string
-	count := 0
-	walkErr := a.walk(ctx, maxHintEntries, func(relative string, _ fs.FileInfo) error {
-		if filepath.Base(relative) == name {
-			count++
-			candidate := filepath.Join(a.base, relative)
-			matches = append(matches, candidate)
-			slices.Sort(matches)
-			if len(matches) > maxHints {
-				matches = matches[:maxHints]
-			}
-		}
-		return nil
-	})
-	// If interrupted, don't present a partial or misleading candidate list.
-	if walkErr != nil || count == 0 {
-		return err
-	}
-	for i, match := range matches {
-		matches[i] = fmt.Sprintf("%q", match)
-	}
-	where := strings.Join(matches, ", ")
-	if count > maxHints {
-		where += fmt.Sprintf(", and %d more", count-maxHints)
-	}
-	subject := "files named"
-	verb := "exist"
-	if count == 1 {
-		subject, verb = "a file named", "exists"
-	}
-	return fmt.Errorf("%w — %s %q %s at %s; use that path instead of creating a new file", err, subject, name, verb, where)
-}
-
-// Walk visits eligible regular files under Base, supplying paths relative to
-// Base. Ineligible entries are never sent to the callback. A missing Base is
-// an empty walk, allowing first creation in a new directory.
-func (s *Store) Walk(ctx context.Context, visit func(relative string, info fs.FileInfo) error) error {
-	a, err := s.snapshot()
-	if err != nil {
-		return err
-	}
-	defer unix.Close(a.fd)
-	return a.walk(ctx, 0, visit)
-}
-
-var errWalkBudget = errors.New("note walk reached its entry limit")
-
-func (a access) walk(ctx context.Context, maxEntries int, visit func(string, fs.FileInfo) error) error {
-	entries := 0
-	var walkDir func(string) error
-	walkDir = func(dir string) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		f, err := openAt(a.fd, dir, unix.O_RDONLY|unix.O_DIRECTORY, 0)
-		if err != nil {
-			if skipWalkEntry(err) {
-				return nil
-			}
-			return pathError("walk", dir, err)
-		}
-		defer f.Close()
-		for {
-			names, err := f.Readdirnames(128)
-			if err != nil && err != io.EOF {
-				return pathError("walk", dir, err)
-			}
-			for _, name := range names {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				entries++
-				if maxEntries > 0 && entries > maxEntries {
-					return errWalkBudget
-				}
-				rel := filepath.Join(dir, name)
-				if reserved(rel, a.excluded) {
-					continue
-				}
-				matches, descends := a.candidates(rel)
-				if !matches && !descends {
-					continue
-				}
-				info, err := a.metadata(rel)
-				if err != nil {
-					if skipWalkEntry(err) {
-						continue
-					}
-					return pathError("walk", rel, err)
-				}
-				if info.IsDir() {
-					if descends {
-						if err := walkDir(rel); err != nil {
-							return err
-						}
-					}
-				} else if matches {
-					name, err := filepath.Rel(a.base, rel)
-					if err != nil {
-						return err
-					}
-					if err := visit(name, info); err != nil {
-						return err
-					}
-				}
-			}
-			if err == io.EOF {
-				return ctx.Err()
-			}
-		}
-	}
-	_, descends := a.candidates(a.base)
-	if !descends || reserved(a.base, a.excluded) {
-		return ctx.Err()
-	}
-	return walkDir(a.base)
-}
-
-func skipWalkEntry(err error) bool {
-	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, ErrNotAllowed) ||
-		errors.Is(err, unix.ENOTDIR) || errors.Is(err, unix.ELOOP) || errors.Is(err, unix.EXDEV)
-}
-
-func (a access) metadata(path string) (fs.FileInfo, error) {
-	f, err := openAt(a.fd, path, unix.O_PATH, 0)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	var st unix.Stat_t
-	if err := unix.Fstat(int(f.Fd()), &st); err != nil {
-		return nil, err
-	}
-	if st.Mode&unix.S_IFMT != unix.S_IFDIR && !regular(&st) {
-		return nil, ErrNotAllowed
-	}
-	return f.Stat()
 }
 
 func (s *Store) Write(path string, data []byte) error {
@@ -478,15 +412,21 @@ func (s *Store) mutate(op, path string, create bool, update func([]byte) ([]byte
 	if s.root == nil {
 		return wrap(fs.ErrClosed)
 	}
-	a := access{s.policy, int(s.root.Fd()), s.excluded}
+	a := access{s.policy, int(s.root.Fd())}
 	rel, err := a.allowedPath(path)
 	if err != nil {
+		return wrap(err)
+	}
+	if !a.writable(rel) {
+		return wrap(ErrNotAllowed)
+	}
+	if err := a.checkAliases(rel, true); err != nil {
 		return wrap(err)
 	}
 	dir, name := filepath.Split(rel)
 	parent, err := a.parent(filepath.Clean(dir), create)
 	if err != nil {
-		return a.hint(path, wrap(err))
+		return wrap(err)
 	}
 	defer parent.Close()
 	fd := int(parent.Fd())
@@ -494,7 +434,7 @@ func (s *Store) mutate(op, path string, create bool, update func([]byte) ([]byte
 	content, original, err := readAt(fd, name, maxMutationBytes)
 	exists := err == nil
 	if !exists && !(create && errors.Is(err, fs.ErrNotExist)) {
-		return a.hint(path, wrap(err))
+		return wrap(err)
 	}
 	if exists {
 		if !utf8.Valid(content) {
@@ -509,6 +449,9 @@ func (s *Store) mutate(op, path string, create bool, update func([]byte) ([]byte
 	// and that the analyzed note has not been modified or replaced. These
 	// checks narrow, but cannot close, races with non-cooperating writers.
 	recheck := func() error {
+		if err := a.checkAliases(rel, true); err != nil {
+			return err
+		}
 		parentNow, err := a.parent(filepath.Clean(dir), false)
 		if err != nil {
 			return err
@@ -568,6 +511,9 @@ func (a access) parent(dir string, create bool) (*os.File, error) {
 	f, err := openAt(a.fd, dir, unix.O_PATH|unix.O_DIRECTORY, 0)
 	if !create || !errors.Is(err, fs.ErrNotExist) {
 		return f, err
+	}
+	if !a.writable(dir) {
+		return nil, ErrNotAllowed
 	}
 	ancestor, err := a.parent(filepath.Dir(dir), true)
 	if err != nil {

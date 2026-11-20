@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/tichopad/bobik/internal/audit"
 	"github.com/tichopad/bobik/internal/fireworks"
 	"github.com/tichopad/bobik/internal/notes"
 	"github.com/tichopad/bobik/internal/sandbox"
@@ -37,17 +38,17 @@ func (f viewFunc) ViewMedia(ctx context.Context, source interface {
 	return f(ctx, source, model, path, prompt)
 }
 
-func config(t *testing.T, pattern string) Config {
+func config(t *testing.T) Config {
 	t.Helper()
 	root := t.TempDir()
-	store, err := notes.Open(pattern, root)
+	store, err := notes.NewVault(root, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { store.Close() })
 	return Config{
-		CWD: root, Notes: store, Prompt: "Update notes.", PromptPath: "prompt.txt",
-		Model: "test-model", AllowPath: pattern, Now: time.Date(2026, 10, 19, 17, 55, 0, 123e6, time.UTC),
+		Notes: store, Prompt: "Update notes.", PromptPath: "prompt.txt",
+		Model: "test-model", Now: time.Date(2026, 10, 19, 17, 55, 0, 123e6, time.UTC),
 	}
 }
 
@@ -77,14 +78,13 @@ func types(events []map[string]any) []string {
 }
 
 func TestRunToolHistoryAndStreamingAudit(t *testing.T) {
-	cfg := config(t, "daily/**/*.md")
-	cfg.LogPath = "run.jsonl"
+	cfg := config(t)
 	cfg.Trigger = "@bobik"
 	cfg.ChangedFiles = []ChangedFile{{"daily/old.md", true}}
 	var writes []string
 	cfg.OnWrite = func(path string) {
 		writes = append(writes, path)
-		events := auditEvents(t, filepath.Join(cfg.CWD, cfg.LogPath))
+		events := auditEvents(t, filepath.Join(cfg.Notes.Base(), audit.Directory, audit.Filename(cfg.Now)))
 		if events[len(events)-1]["type"] != "tool-call" {
 			t.Fatal("tool was not audited before mutating")
 		}
@@ -127,11 +127,11 @@ func TestRunToolHistoryAndStreamingAudit(t *testing.T) {
 	if summary.Text != "Done." || summary.Usage.TotalTokens != 18 || !slices.Equal(summary.WrittenPaths, []string{"daily/a.md"}) {
 		t.Fatalf("incorrect summary: %+v", summary)
 	}
-	abs := filepath.Join(cfg.CWD, "daily/a.md")
+	abs := filepath.Join(cfg.Notes.Base(), "daily/a.md")
 	if !slices.Equal(writes, []string{abs, abs}) {
 		t.Fatalf("writes = %q", writes)
 	}
-	if got, want := FormatSummary(summary), "bobik: 2 steps, 1 file written, 18 tokens (in 8, out 10), log run.jsonl"; got != want {
+	if got, want := FormatSummary(summary), "bobik: 2 steps, 1 file written, 18 tokens (in 8, out 10), log "+summary.LogRelativePath; got != want {
 		t.Errorf("summary = %q, want %q", got, want)
 	}
 	events := auditEvents(t, summary.LogPath)
@@ -147,7 +147,7 @@ func TestRunToolHistoryAndStreamingAudit(t *testing.T) {
 }
 
 func TestToolErrorsRecoverAndCustomTriggerProtectsDrafts(t *testing.T) {
-	cfg := config(t, "**/*.md")
+	cfg := config(t)
 	cfg.Trigger = "@draft"
 	if err := cfg.Notes.Write("draft.md", []byte("%% @draft %%")); err != nil {
 		t.Fatal(err)
@@ -165,7 +165,7 @@ func TestToolErrorsRecoverAndCustomTriggerProtectsDrafts(t *testing.T) {
 				{ID: "4", Name: "readFile", Arguments: `{"path":"missing.md"}`},
 			}}, FinishReason: "tool_calls"}, nil
 		}
-		want := []string{"draft", "duplicate", "unknown tool", "sub/missing.md"}
+		want := []string{"draft", "duplicate", "unknown tool", "missing.md"}
 		for i, msg := range req.Messages[3:] {
 			if !strings.Contains(msg.Content, want[i]) || !strings.Contains(msg.Content, `"error":`) {
 				t.Errorf("unexpected result %d: %+v", i, msg)
@@ -184,7 +184,7 @@ func TestToolErrorsRecoverAndCustomTriggerProtectsDrafts(t *testing.T) {
 }
 
 func TestPartialSummariesOnLimitAndDeadline(t *testing.T) {
-	cfg := config(t, "*.md")
+	cfg := config(t)
 	cfg.MaxSteps = 1
 	cfg.ModelClient = completeFunc(func(context.Context, fireworks.Request) (fireworks.Response, error) {
 		return fireworks.Response{Message: fireworks.Message{
@@ -207,7 +207,7 @@ func TestPartialSummariesOnLimitAndDeadline(t *testing.T) {
 }
 
 func TestVisionFailureStillCountsUsageWithoutExposingProviderError(t *testing.T) {
-	cfg := config(t, "**/*")
+	cfg := config(t)
 	cfg.VisionModel = "vision"
 	cfg.VisionClient = viewFunc(func(_ context.Context, _ interface {
 		Read(string, int64) ([]byte, error)
@@ -241,7 +241,7 @@ func TestVisionFailureStillCountsUsageWithoutExposingProviderError(t *testing.T)
 func TestIncompleteFinishDoesNotDispatchToolCalls(t *testing.T) {
 	for _, finish := range []string{"length", "content_filter", "error", "stop", ""} {
 		t.Run(finish, func(t *testing.T) {
-			cfg := config(t, "*.md")
+			cfg := config(t)
 			cfg.ModelClient = completeFunc(func(context.Context, fireworks.Request) (fireworks.Response, error) {
 				return fireworks.Response{FinishReason: finish, Message: fireworks.Message{ToolCalls: []fireworks.Call{
 					{ID: "unsafe", Name: "writeFile", Arguments: `{"path":"unexpected.md","content":"write"}`},
@@ -251,7 +251,7 @@ func TestIncompleteFinishDoesNotDispatchToolCalls(t *testing.T) {
 			if err == nil || summary.Steps != 1 || summary.FilesWritten != 0 {
 				t.Fatalf("ambiguous finish: %+v, %v", summary, err)
 			}
-			if _, err := os.Stat(filepath.Join(cfg.CWD, "unexpected.md")); !os.IsNotExist(err) {
+			if _, err := os.Stat(filepath.Join(cfg.Notes.Base(), "unexpected.md")); !os.IsNotExist(err) {
 				t.Fatalf("tool mutated the vault: %v", err)
 			}
 		})
@@ -259,7 +259,7 @@ func TestIncompleteFinishDoesNotDispatchToolCalls(t *testing.T) {
 }
 
 func TestHistoryLimitStopsBeforeProviderCall(t *testing.T) {
-	cfg := config(t, "*.md")
+	cfg := config(t)
 	cfg.Prompt = strings.Repeat("a", MaxHistory)
 	cfg.ModelClient = completeFunc(func(context.Context, fireworks.Request) (fireworks.Response, error) {
 		t.Fatal("oversized history was sent to the provider")
@@ -271,14 +271,13 @@ func TestHistoryLimitStopsBeforeProviderCall(t *testing.T) {
 	}
 }
 
-func TestExplicitAuditPathIsUnavailableToTools(t *testing.T) {
-	cfg := config(t, "*.md")
-	cfg.LogPath = "audit.md"
+func TestAuditPathIsUnavailableToTools(t *testing.T) {
+	cfg := config(t)
 	cfg.ModelClient = completeFunc(func(_ context.Context, req fireworks.Request) (fireworks.Response, error) {
 		if len(req.Messages) == 2 {
 			return fireworks.Response{FinishReason: "tool_calls", Message: fireworks.Message{ToolCalls: []fireworks.Call{
-				{ID: "audit-read", Name: "readFile", Arguments: `{"path":"audit.md"}`},
-				{ID: "audit-delete", Name: "deleteFile", Arguments: `{"path":"/audit.md"}`},
+				{ID: "audit-read", Name: "readFile", Arguments: `{"path":".agent-bobik/2026-10-19T17-55-00.123.jsonl"}`},
+				{ID: "audit-delete", Name: "deleteFile", Arguments: `{"path":"/.agent-bobik/2026-10-19T17-55-00.123.jsonl"}`},
 			}}}, nil
 		}
 		for _, result := range req.Messages[3:] {
@@ -291,6 +290,52 @@ func TestExplicitAuditPathIsUnavailableToTools(t *testing.T) {
 	summary, err := Run(t.Context(), cfg)
 	if err != nil || summary.FilesWritten != 0 {
 		t.Fatalf("audit exclusion: %+v, %v", summary, err)
+	}
+}
+
+func TestBashUsesLiveVaultAndRecordedRules(t *testing.T) {
+	vault := t.TempDir()
+	for _, dir := range []string{"private", "archive"} {
+		if err := os.Mkdir(filepath.Join(vault, dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, err := notes.NewVault(vault, []notes.Rule{
+		{Path: "private", Mode: notes.Hide}, {Path: "archive", Mode: notes.ReadOnly},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	preflight := sandbox.Preflight(t.Context())
+	cfg := Config{Notes: store, Model: "test-model"}
+	cfg.ModelClient = completeFunc(func(_ context.Context, req fireworks.Request) (fireworks.Response, error) {
+		if len(req.Messages) == 2 {
+			return fireworks.Response{FinishReason: "tool_calls", Message: fireworks.Message{ToolCalls: []fireworks.Call{
+				{ID: "shell", Name: "bash", Arguments: `{"command":"if printf x >private/x || printf x >archive/x || printf x >.agent-bobik/x; then exit 42; fi; printf live >live.md"}`},
+			}}}, nil
+		}
+		result := req.Messages[len(req.Messages)-1].Content
+		want := `"exitCode":0`
+		if preflight != nil {
+			want = "Bash sandbox unavailable"
+		}
+		if !strings.Contains(result, want) {
+			t.Errorf("Bash result = %s, want %s", result, want)
+		}
+		return fireworks.Response{FinishReason: "stop"}, nil
+	})
+	summary, err := Run(t.Context(), cfg)
+	if err != nil || len(summary.WrittenPaths) != 0 {
+		t.Fatalf("Bash paths must not be attributed individually: %+v, %v", summary, err)
+	}
+	data, err := os.ReadFile(filepath.Join(vault, "live.md"))
+	if preflight == nil {
+		if err != nil || string(data) != "live" {
+			t.Fatalf("Bash write not visible on host: %q, %v", data, err)
+		}
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("command ran despite unavailable sandbox: %q, %v", data, err)
 	}
 }
 
@@ -315,23 +360,8 @@ func TestShellResultPreservesStatusWithinJSONBudget(t *testing.T) {
 	}
 }
 
-func TestShellSourceReadsTheStagedRelativePath(t *testing.T) {
-	cfg := config(t, "daily/**/*.md")
-	if err := cfg.Notes.Write("daily/nested/a.md", []byte("body")); err != nil {
-		t.Fatal(err)
-	}
-	source := shellSource{cfg.Notes}
-	got, err := source.Read("nested/a.md", 4)
-	if err != nil || string(got) != "body" {
-		t.Fatalf("shell read = %q, %v", got, err)
-	}
-	if _, err := source.Read("../daily/nested/a.md", 4); !errors.Is(err, notes.ErrNotAllowed) {
-		t.Fatalf("invalid shell path: %v", err)
-	}
-}
-
 func TestRunThroughFireworksHTTP(t *testing.T) {
-	cfg := config(t, "*.md")
+	cfg := config(t)
 	count := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		count++

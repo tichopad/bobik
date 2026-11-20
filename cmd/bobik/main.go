@@ -92,15 +92,23 @@ func (a app) run(args []string) int {
 	if err != nil {
 		return a.fail(exitRunError, err)
 	}
-	promptPath := o.prompt
-	if !filepath.IsAbs(promptPath) {
-		promptPath = filepath.Join(cwd, promptPath)
-	}
+	vault := fromDirectory(cwd, o.vault)
+	promptPath := fromDirectory(cwd, o.prompt)
 	loadPrompt := func() (string, error) {
-		b, err := readRegular(promptPath, promptLimit)
+		path, err := filepath.EvalSymlinks(promptPath)
 		if errors.Is(err, fs.ErrNotExist) {
 			return "", fmt.Errorf("prompt file not found: %s", promptPath)
 		}
+		if err != nil {
+			return "", fmt.Errorf("resolve prompt file: %w", err)
+		}
+		if within(vault, promptPath) {
+			return "", errors.New("prompt must be outside the vault")
+		}
+		if err := sandbox.CheckPrivatePath(vault, path); err != nil {
+			return "", fmt.Errorf("prompt must be outside the vault and the shell's system directories: %w", err)
+		}
+		b, err := readRegular(path, promptLimit)
 		if err != nil {
 			return "", fmt.Errorf("could not read prompt file: %w", err)
 		}
@@ -110,34 +118,23 @@ func (a app) run(args []string) int {
 	if err != nil {
 		return a.fail(exitUsage, err)
 	}
+	if path, err := configPath(a.getenv); err == nil {
+		if err := checkKeyLocation(vault, fromDirectory(cwd, path)); err != nil {
+			return a.fail(exitUsage, err)
+		}
+	}
 	key, err := requireKey(a.getenv)
 	if err != nil {
 		return a.fail(exitUsage, err)
 	}
-	store, err := notes.Open(o.allow, cwd)
+	store, err := notes.NewVault(vault, o.rules)
 	if err != nil {
-		var fsErr *fs.PathError
-		if errors.As(err, &fsErr) {
-			return a.fail(exitRunError, err)
-		}
 		return a.fail(exitUsage, err)
 	}
 	defer store.Close()
-	store.SetTrigger(o.trigger)
-	if path, err := configPath(a.getenv); err == nil {
-		// The saved key is host configuration, even if the user picks a
-		// broad allowlist. Also exclude the target of a symlinked config.
-		dir := filepath.Dir(path)
-		for _, excluded := range []string{dir, resolvedPath(dir), resolvedPath(path)} {
-			if err := store.Exclude(excluded); err != nil {
-				return a.fail(exitRunError, fmt.Errorf("exclude API key configuration: %w", err))
-			}
-		}
-	}
-
 	client := a.client(key)
 	cfg := agent.Config{
-		CWD: cwd, PromptPath: o.prompt, AllowPath: o.allow, Trigger: o.trigger,
+		PromptPath: promptPath, Trigger: o.trigger,
 		Notes: store, Model: o.model, VisionModel: o.visionModel,
 		MaxSteps: o.steps, ModelClient: client, VisionClient: client,
 	}
@@ -158,7 +155,7 @@ func (a app) run(args []string) int {
 	done := make(chan error, 1)
 	go func() {
 		done <- watch.Run(ctx, watch.Config{
-			Root: cwd, PromptFile: promptPath, ReadPrompt: loadPrompt,
+			PromptFile: promptPath, ReadPrompt: loadPrompt,
 			Trigger: o.trigger, QuietPeriod: o.quietPeriod, Notes: store,
 			Stdout: a.stdout, Stderr: a.stderr, Stop: stop,
 			Run: func(ctx context.Context, prompt string) ([]string, error) {
@@ -220,9 +217,16 @@ func (a app) runAgent(ctx context.Context, cfg agent.Config, watching bool) ([]s
 	return summary.WrittenPaths, err
 }
 
-func resolvedPath(path string) string {
-	path, _ = filepath.EvalSymlinks(path)
-	return path
+func fromDirectory(dir, path string) string {
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path)
+	}
+	return filepath.Join(dir, path)
+}
+
+func within(dir, path string) bool {
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && filepath.IsLocal(rel)
 }
 
 type serialWriter struct {

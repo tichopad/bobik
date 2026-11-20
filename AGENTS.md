@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Bobik is a Linux-only CLI AI agent for Markdown notes. Its Go note store owns every live note mutation; Bash can search only a filtered, read-only Bubblewrap copy. Each run writes a JSONL audit log.
+Bobik is a Linux-only CLI AI agent for Markdown notes. Typed tools and offline Bubblewrap Bash share a designated live vault with directory exceptions. Each run writes a JSONL audit log.
 
 - Use Go 1.26+ and `gofmt`. The entrypoint is `cmd/bobik`; production packages live in `internal/`.
 - Verify changes with `go test ./...`, `go test -race ./...`, `go vet ./...`, and `go build ./cmd/bobik`.

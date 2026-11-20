@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/tichopad/bobik/internal/sandbox"
 	"golang.org/x/sys/unix"
 )
 
@@ -29,6 +30,38 @@ func configPath(getenv environment) (string, error) {
 
 type keyConfig struct {
 	APIKey string `json:"apiKey"`
+}
+
+func checkKeyLocation(vault, path string) error {
+	resolved, err := resolveConfigPath(path)
+	if err != nil {
+		return fmt.Errorf("resolve saved API key location: %w", err)
+	}
+	for _, name := range []string{path, resolved} {
+		if within(vault, name) || within(filepath.Dir(name), vault) {
+			return errors.New("saved API key configuration must be outside the vault and the shell's system directories")
+		}
+	}
+	if err := sandbox.CheckPrivatePath(vault, resolved); err != nil {
+		return fmt.Errorf("saved API key configuration must be outside the vault and the shell's system directories: %w", err)
+	}
+	return nil
+}
+
+// The default config often doesn't exist when using an environment key.
+func resolveConfigPath(path string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err == nil || !errors.Is(err, fs.ErrNotExist) {
+		return resolved, err
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, fs.ErrNotExist) {
+		return "", fmt.Errorf("%s: missing or inaccessible symlink target", path)
+	}
+	parent, err := resolveConfigPath(filepath.Dir(path))
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(parent, filepath.Base(path)), nil
 }
 
 func requireKey(getenv environment) (string, error) {

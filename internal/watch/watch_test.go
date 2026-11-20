@@ -43,16 +43,16 @@ func startTestWatch(t *testing.T, configure func(*Config), callback func(context
 		root: t.TempDir(), runs: make(chan testRun, 20), reports: make(chan string, 100),
 		graceful: make(chan struct{}), stopped: make(chan struct{}),
 	}
-	h.prompt = filepath.Join(h.root, "prompt.md")
+	h.prompt = filepath.Join(t.TempDir(), "prompt.md")
 	write(t, h.prompt, "original prompt")
-	store, err := notes.Open("notes/**/*.md", h.root)
+	store, err := notes.NewVault(h.root, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	h.abort = cancel
 	cfg := Config{
-		Root: h.root, PromptFile: h.prompt, Notes: store,
+		PromptFile: h.prompt, Notes: store,
 		Stop: h.graceful, Stdout: io.Discard, Stderr: reportWriter(h.reports),
 		Run: func(ctx context.Context, prompt string) ([]string, error) {
 			initial, files := Changes(ctx)
@@ -164,14 +164,14 @@ func expectFiles(t *testing.T, run testRun, files ...ChangedFile) {
 	}
 }
 
-func TestNativeWatchMissingBaseAtomicSaveAndMove(t *testing.T) {
+func TestNativeWatchAtomicSaveAndMove(t *testing.T) {
 	h := startTestWatch(t, nil, nil)
 	if run := h.nextRun(t); !run.initial || run.files != nil || run.prompt != "original prompt" {
 		t.Fatalf("unexpected startup run: %+v", run)
 	}
 
 	// Move in a populated tree before there are any watches beneath it.
-	incoming := filepath.Join(h.root, "incoming")
+	incoming := filepath.Join(t.TempDir(), "incoming")
 	mkdir(t, filepath.Join(incoming, "nested"))
 	write(t, filepath.Join(incoming, "nested", "first.md"), "#bobik request\n")
 	write(t, filepath.Join(incoming, "nested", "ignored.txt"), "#bobik\n")
@@ -181,7 +181,7 @@ func TestNativeWatchMissingBaseAtomicSaveAndMove(t *testing.T) {
 	h.noRun(t)
 
 	write(t, h.prompt, "edited prompt")
-	tmp := filepath.Join(h.root, "temp.md")
+	tmp := filepath.Join(h.root, "temp.tmp")
 	write(t, tmp, "#bobik updated")
 	rename(t, tmp, filepath.Join(h.root, first))
 	run := h.nextRun(t)

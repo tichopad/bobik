@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/tichopad/bobik/internal/notes"
 )
 
 const (
@@ -21,14 +23,17 @@ const (
 const help = `bobik — a single-purpose AI agent for Markdown notes
 
 Usage:
-  bobik --prompt <path> --allow-path <glob> [options]
+  bobik --prompt <path> --vault <directory> [options]
   bobik set-api-key <key>
   bobik check-sandbox
   bobik --help | --version
 
 Options:
-  --prompt <path>          Markdown task instructions (required)
-  --allow-path <glob>      Only files matching this glob are accessible (required)
+  --prompt <path>          Markdown instructions outside the vault (required)
+  --vault <directory>      Live notes directory (required)
+  --hide <directory>       Hide a vault-relative directory (repeatable)
+  --read-only <directory>  Allow reading but not writing (repeatable)
+  --pin <directory>        Prevent moving or deleting the directory itself (repeatable)
   --model <id>             Fireworks model (default: ` + defaultModel + `)
   --vision-model <id>      Image inspection model (defaults to --model)
   --max-steps <n>          Step limit (default: 25)
@@ -37,11 +42,12 @@ Options:
   --watch-delay <seconds>  Quiet period (default: 60; 0 disables it)
 
 FIREWORKS_API_KEY overrides the key saved by set-api-key.
-Runs are limited to five minutes. Bash searches require Bubblewrap.
+Runs are limited to five minutes. Bash requires Bubblewrap.
 `
 
 type options struct {
-	prompt, allow, model, visionModel, trigger string
+	prompt, vault, model, visionModel, trigger string
+	rules                                      []notes.Rule
 	steps                                      int
 	quietPeriod                                time.Duration
 	watch                                      bool
@@ -53,7 +59,16 @@ func parseOptions(args []string) (options, error) {
 	flags := flag.NewFlagSet("bobik", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	flags.StringVar(&o.prompt, "prompt", "", "")
-	flags.StringVar(&o.allow, "allow-path", "", "")
+	flags.StringVar(&o.vault, "vault", "", "")
+	for _, mode := range []notes.Mode{notes.Hide, notes.ReadOnly, notes.Pin} {
+		flags.Func(string(mode), "", func(path string) error {
+			if strings.TrimSpace(path) == "" || strings.HasPrefix(path, "--") {
+				return fmt.Errorf("--%s requires a vault-relative directory", mode)
+			}
+			o.rules = append(o.rules, notes.Rule{Path: path, Mode: mode})
+			return nil
+		})
+	}
 	flags.StringVar(&o.model, "model", defaultModel, "")
 	flags.StringVar(&o.visionModel, "vision-model", "", "")
 	flags.StringVar(&o.trigger, "trigger", defaultTrigger, "")
@@ -61,8 +76,12 @@ func parseOptions(args []string) (options, error) {
 	flags.StringVar(&steps, "max-steps", strconv.Itoa(defaultSteps), "")
 	flags.BoolVar(&o.watch, "watch", false, "")
 	for _, arg := range args {
-		if arg == "--deny" || strings.HasPrefix(arg, "--deny=") {
-			return o, errors.New("--deny was removed: Bash is now isolated and read-only for notes; remove this flag")
+		name, _, _ := strings.Cut(arg, "=")
+		switch name {
+		case "--allow-path":
+			return o, errors.New("--allow-path was removed; select a writable directory with --vault")
+		case "--deny":
+			return o, errors.New("--deny was removed; use --hide or --read-only for vault directories")
 		}
 	}
 	if err := flags.Parse(args); err != nil {
@@ -72,7 +91,7 @@ func parseOptions(args []string) (options, error) {
 		return o, fmt.Errorf("unexpected argument: %s", flags.Arg(0))
 	}
 	for _, required := range []struct{ name, value string }{
-		{"prompt", o.prompt}, {"allow-path", o.allow}, {"model", o.model}, {"trigger", o.trigger},
+		{"prompt", o.prompt}, {"vault", o.vault}, {"model", o.model}, {"trigger", o.trigger},
 	} {
 		if strings.TrimSpace(required.value) == "" || strings.HasPrefix(required.value, "--") {
 			return o, fmt.Errorf("--%s requires a value", required.name)

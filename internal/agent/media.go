@@ -33,7 +33,7 @@ func (s *runState) viewMedia(ctx context.Context, id, path, prompt string) (any,
 		if max > fireworks.MaxImageBytes || max <= 0 {
 			max = fireworks.MaxImageBytes
 		}
-		data, err := s.cfg.Notes.ReadRaw(notePath(name), max)
+		data, err := s.cfg.Notes.Read(notePath(name), max)
 		if err == nil {
 			event["byteCount"] = len(data)
 			event["sha256"] = fmt.Sprintf("%x", sha256.Sum256(data))

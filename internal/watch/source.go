@@ -21,19 +21,16 @@ import (
 // are the startup run's responsibility, not new watch events.
 type source struct {
 	*fsnotify.Watcher
-	ctx        context.Context
-	store      *notes.Store
-	root, base string
-	rootFile   *os.File
-	dirs       map[string]fs.FileInfo
-	known      map[string]fs.FileInfo
+	ctx      context.Context
+	store    *notes.Store
+	root     string
+	rootFile *os.File
+	dirs     map[string]fs.FileInfo
+	known    map[string]fs.FileInfo
 }
 
-func newSource(ctx context.Context, root string, store *notes.Store) (*source, error) {
-	base := absolute(root, store.Base())
-	if !under(base, root) {
-		return nil, fmt.Errorf("watch base %s is outside working directory %s", base, root)
-	}
+func newSource(ctx context.Context, store *notes.Store) (*source, error) {
+	root := store.Base()
 	watcher, err := fsnotify.NewBufferedWatcher(256)
 	if err != nil {
 		return nil, err
@@ -46,11 +43,11 @@ func newSource(ctx context.Context, root string, store *notes.Store) (*source, e
 		return nil, fmt.Errorf("open watch root %s: %w", root, err)
 	}
 	src := &source{
-		Watcher: watcher, ctx: ctx, store: store, root: root, base: base,
+		Watcher: watcher, ctx: ctx, store: store, root: root,
 		rootFile: os.NewFile(uintptr(fd), root),
 		dirs:     make(map[string]fs.FileInfo), known: make(map[string]fs.FileInfo),
 	}
-	if err := src.scan(func(path string, info fs.FileInfo) { src.known[path] = info }); err != nil {
+	if err := src.scanDir(root, func(path string, info fs.FileInfo) { src.known[path] = info }); err != nil {
 		src.Close()
 		return nil, err
 	}
@@ -65,15 +62,7 @@ func (s *source) Close() {
 func (s *source) event(event fsnotify.Event, queue func(string)) error {
 	path := event.Name
 	topology := event.Has(fsnotify.Create) || event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename)
-	if !under(path, s.base) {
-		// Ancestors are watched so a missing base can appear later, or a base
-		// moved away can be replaced.
-		if topology && under(s.base, path) {
-			if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
-				s.detach(path)
-			}
-			return s.reconcile(s.ctx, queue)
-		}
+	if !under(path, s.root) {
 		return nil
 	}
 	match, canDescend := s.store.WatchPath(path)
@@ -83,9 +72,6 @@ func (s *source) event(event fsnotify.Event, queue func(string)) error {
 			s.detach(path)
 		}
 		if _, err := s.stat(path, unix.O_DIRECTORY); err == nil && canDescend {
-			if path == s.base {
-				return s.reconcile(s.ctx, queue)
-			}
 			return s.scanDir(path, func(path string, info fs.FileInfo) {
 				if changed(s.known[path], info) {
 					queue(path)
@@ -126,7 +112,7 @@ func (s *source) reconcile(ctx context.Context, queue func(string)) error {
 		}
 	}
 	current := make(map[string]struct{})
-	if err := s.scan(func(path string, info fs.FileInfo) {
+	if err := s.scanDir(s.root, func(path string, info fs.FileInfo) {
 		current[path] = struct{}{}
 		if changed(s.known[path], info) {
 			queue(path)
@@ -149,25 +135,6 @@ func changed(prev, now fs.FileInfo) bool {
 	before, beforeOK := prev.Sys().(*syscall.Stat_t)
 	after, afterOK := now.Sys().(*syscall.Stat_t)
 	return beforeOK && afterOK && before.Ctim != after.Ctim
-}
-
-func (s *source) scan(visit func(string, fs.FileInfo)) error {
-	rel, err := filepath.Rel(s.root, s.base)
-	if err != nil {
-		return err
-	}
-	dir := s.root
-	if rel != "." {
-		for part := range strings.SplitSeq(rel, string(filepath.Separator)) {
-			f, err := s.attach(dir)
-			if err != nil || f == nil {
-				return err
-			}
-			f.Close()
-			dir = filepath.Join(dir, part)
-		}
-	}
-	return s.scanDir(dir, visit)
 }
 
 func (s *source) scanDir(dir string, visit func(string, fs.FileInfo)) error {

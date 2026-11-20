@@ -13,14 +13,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func testSource(t *testing.T, root, glob string) *source {
+func testSource(t *testing.T, root string, rules ...notes.Rule) *source {
 	t.Helper()
-	store, err := notes.Open(glob, root)
+	store, err := notes.NewVault(root, rules)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { store.Close() })
-	src, err := newSource(context.Background(), root, store)
+	src, err := newSource(context.Background(), store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +37,7 @@ func TestReconcileRecoversMissedEventsAndDirectoryWatches(t *testing.T) {
 	write(t, changed, "#bobik original")
 	write(t, removed, "#bobik delete")
 	write(t, unchanged, "#bobik no change")
-	src := testSource(t, root, "**/*.md")
+	src := testSource(t, root)
 
 	// Simulate a lost event stream by not delivering any native events to the
 	// source. Recovery must compare the tree and repair its directory watches.
@@ -76,7 +76,7 @@ func TestSourceSkipsSymlinkHiddenAuditAndHardlinkEntries(t *testing.T) {
 	if err := os.Link(filepath.Join(outside, "outside.md"), filepath.Join(root, "hard.md")); err != nil {
 		t.Fatal(err)
 	}
-	src := testSource(t, root, "**/*.md")
+	src := testSource(t, root, notes.Rule{Path: ".hidden", Mode: notes.Hide})
 	want := filepath.Join(root, "normal", "fake.md")
 	if len(src.known) != 1 || src.known[want] == nil || len(src.WatchList()) != 2 {
 		t.Fatalf("unexpected metadata or watches: %v, %v", src.known, src.WatchList())
@@ -101,7 +101,7 @@ func TestSourceSkipsBindMountWhenPermitted(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	src := testSource(t, root, "**/*.md")
+	src := testSource(t, root)
 	if len(src.known) != 0 || len(src.WatchList()) != 1 {
 		t.Fatalf("crossed bind mount: notes=%v watches=%v", src.known, src.WatchList())
 	}

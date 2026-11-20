@@ -3,12 +3,10 @@
 package notes
 
 import (
-	"context"
 	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 
@@ -27,126 +25,22 @@ func put(t *testing.T, root, name, content string) string {
 	return path
 }
 
-func openStore(t *testing.T, pattern, root string) *Store {
-	t.Helper()
-	store, err := Open(pattern, root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	return store
-}
-
-func TestReadWalkPolicy(t *testing.T) {
+func TestReadPathResolutionAndLimit(t *testing.T) {
 	root := t.TempDir()
-	daily := put(t, root, "daily notes/day.md", "daily")
-	put(t, root, "daily notes/sub/day.md", "nested")
-	put(t, root, "daily notes/sub/another.markdown", "another")
-	put(t, root, "daily notes/sub/unapproved.txt", "private")
-	put(t, root, "daily notes/.draft.md", "hidden")
-	put(t, root, "daily notes/.private/day.md", "hidden")
-	put(t, root, "daily notes/faux.md/info.md", "beneath a directory")
-	put(t, root, "daily notes/excluded/config.md", "config")
-	put(t, root, "daily notes/audit.md", "audit")
-	put(t, root, "other/outside.md", "private")
-	store := openStore(t, filepath.Join(root, `daily\ notes/**/*.{md,markdown}`), root)
-	base := filepath.Join(root, "daily notes")
-	if got := store.Base(); got != base {
-		t.Fatalf("Base = %q, want %q", got, base)
-	}
-	if err := store.Exclude("daily notes/excluded"); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.SetAuditPath(filepath.Join(base, "audit.md")); err != nil {
-		t.Fatal(err)
-	}
-	for _, path := range []string{"daily notes/audit.md", "daily notes/excluded/subfolder", ".agent-bobik/session.jsonl"} {
-		if err := store.Exclude(path); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if len(store.excluded) != 2 {
-		t.Fatalf("stored redundant exclusions: %v", store.excluded)
-	}
-	if matches, descends := store.WatchPath("day.md"); !matches || !descends {
-		t.Errorf("WatchPath(Base-relative day.md) = %v, %v", matches, descends)
-	}
-	if matches, descends := store.WatchPath(filepath.Join(base, "excluded")); matches || descends {
-		t.Errorf("WatchPath(excluded) = %v, %v", matches, descends)
-	}
-	if matches, descends := store.WatchPath("../other/outside.md"); matches || descends {
-		t.Errorf("WatchPath(outside base) = %v, %v", matches, descends)
-	}
-	for _, path := range []string{"daily notes/day.md", daily, "./daily notes/sub/../day.md"} {
-		if got, err := store.Read(path, 5); err != nil || string(got) != "daily" {
+	file := put(t, root, "daily notes/day.md", "daily")
+	s := newVault(t, root)
+	for _, path := range []string{"daily notes/day.md", file, "./daily notes/sub/../day.md"} {
+		if got, err := s.Read(path, 5); err != nil || string(got) != "daily" {
 			t.Errorf("Read(%q) = %q, %v", path, got, err)
 		}
 	}
-	for _, path := range []string{"day.md", "daily notes/.draft.md", "other/outside.md", "daily notes/audit.md",
-		"daily notes/excluded/config.md", "daily notes/faux.md", "daily notes/.private/day.md",
-		"daily notes/sub/unapproved.txt", "/other/outside.md", "../outside.md", "daily notes/day.md\x00"} {
-		if _, err := store.Read(path, -1); !errors.Is(err, ErrNotAllowed) {
+	for _, path := range []string{"daily notes", "/other/outside.md", "../outside.md", "daily notes/day.md\x00"} {
+		if _, err := s.Read(path, -1); !errors.Is(err, ErrNotAllowed) {
 			t.Errorf("Read(%q) = %v, want ErrNotAllowed", path, err)
 		}
 	}
-	if _, err := store.Read(daily, 4); !errors.Is(err, ErrTooLarge) {
+	if _, err := s.Read(file, 4); !errors.Is(err, ErrTooLarge) {
 		t.Errorf("small Read = %v, want ErrTooLarge", err)
-	}
-
-	var got []string
-	err := store.Walk(t.Context(), func(relative string, info fs.FileInfo) error {
-		if !info.Mode().IsRegular() {
-			t.Errorf("walk yielded non-regular %q", relative)
-		}
-		if _, err := store.Read(filepath.Join(base, relative), 256); err != nil {
-			t.Errorf("walked file cannot be read: %v", err)
-		}
-		got = append(got, relative)
-		return nil
-	})
-	slices.Sort(got)
-	want := []string{"day.md", "faux.md/info.md", "sub/another.markdown", "sub/day.md"}
-	if err != nil || !slices.Equal(got, want) {
-		t.Fatalf("Walk = %v, %v; want %v", got, err, want)
-	}
-}
-
-func TestGlobForms(t *testing.T) {
-	root := t.TempDir()
-	put(t, root, "note.md", "root")
-	put(t, root, ".notes/note.md", "hidden dir")
-	put(t, root, ".notes/.seed.md", "hidden file")
-	put(t, root, ".agent-bobik/log.md", "audit")
-	put(t, root, "daily*notes/2026.md", "escaped")
-	for _, pattern := range []string{"", "!**/*.md", "foo/../../*.md", filepath.Join(filepath.Dir(root), "*.md"),
-		"**/+(test).md", "{one/two,three}/note.md", "{1..3}.md", "foo/[broken", "foo/\x00", `\../*.md`} {
-		if s, err := Open(pattern, root); err == nil {
-			_ = s.Close()
-			t.Errorf("accepted invalid pattern %q", pattern)
-		}
-	}
-	for _, test := range []struct{ pattern, read string }{
-		{"**/*.md", "note.md"}, {".notes/**/*.md", ".notes/note.md"},
-		{".notes/**/.seed.md", ".notes/.seed.md"}, {`daily\*notes/2026.md`, "daily*notes/2026.md"},
-		{"**/{.seed,note}.md", "note.md"}, {".notes/{.seed,note}.md", ".notes/.seed.md"},
-	} {
-		if _, err := openStore(t, test.pattern, root).Read(test.read, -1); err != nil {
-			t.Errorf("%q should allow %q: %v", test.pattern, test.read, err)
-		}
-	}
-	store := openStore(t, ".agent-bobik/**/*.md", root)
-	if _, err := store.Read(".agent-bobik/log.md", -1); !errors.Is(err, ErrNotAllowed) {
-		t.Errorf("audit file not protected: %v", err)
-	}
-	if err := store.Walk(t.Context(), func(path string, _ fs.FileInfo) error {
-		t.Errorf("walk exposed audit file %q", path)
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	single := openStore(t, ".notes/note.md", root)
-	if got := single.Base(); got != filepath.Join(root, ".notes") {
-		t.Errorf("literal file's Base = %q", got)
 	}
 }
 
@@ -166,7 +60,7 @@ func TestSymlinksHardLinksAndSpecialFilesAreNotEligible(t *testing.T) {
 	if err := unix.Mkfifo(filepath.Join(root, "fifo.md"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	store := openStore(t, "**/*.md", root)
+	store := newVault(t, root)
 	for _, path := range []string{"external/secrets.md", "inside/normal.md", "symlink.md", "hardlink.md", "fifo.md"} {
 		if _, err := store.Read(path, -1); !errors.Is(err, ErrNotAllowed) {
 			t.Errorf("Read(%q) should reject file: %v", path, err)
@@ -178,17 +72,13 @@ func TestSymlinksHardLinksAndSpecialFilesAreNotEligible(t *testing.T) {
 			t.Errorf("Delete(%q) should reject file: %v", path, err)
 		}
 	}
-	var seen []string
-	if err := store.Walk(t.Context(), func(path string, _ fs.FileInfo) error {
-		seen = append(seen, path)
-		return nil
-	}); err != nil || !slices.Equal(seen, []string{"real/normal.md"}) {
-		t.Fatalf("Walk = %q, %v", seen, err)
+	if got, err := store.Read("real/normal.md", -1); err != nil || string(got) != "visible" {
+		t.Fatalf("Read visible file = %q, %v", got, err)
 	}
 	if got, err := os.ReadFile(outside); err != nil || string(got) != "do not touch" {
 		t.Fatalf("outside file changed: %q, %v", got, err)
 	}
-	if linkRoot, err := Open("**/*.md", filepath.Join(root, "external")); !errors.Is(err, ErrNotAllowed) {
+	if linkRoot, err := NewVault(filepath.Join(root, "external"), nil); !errors.Is(err, ErrNotAllowed) {
 		if linkRoot != nil {
 			_ = linkRoot.Close()
 		}
@@ -196,9 +86,9 @@ func TestSymlinksHardLinksAndSpecialFilesAreNotEligible(t *testing.T) {
 	}
 }
 
-func TestMutationsAndHints(t *testing.T) {
+func TestMutationsAndMissingPaths(t *testing.T) {
 	root := t.TempDir()
-	store := openStore(t, "notes/**/*.md", root)
+	store := newVault(t, root)
 	path := "notes/new/deep/note.md"
 	if err := store.Write(path, []byte("dupe\ndupe\nsingle")); err != nil {
 		t.Fatal(err)
@@ -220,12 +110,9 @@ func TestMutationsAndHints(t *testing.T) {
 		func() error { return store.Edit("notes/note.md", "one", "two") },
 		func() error { return store.Delete("notes/note.md") },
 	} {
-		if err := op(); !errors.Is(err, fs.ErrNotExist) || !strings.Contains(err.Error(), path) {
-			t.Errorf("missing-path hint: %v", err)
+		if err := op(); !errors.Is(err, fs.ErrNotExist) || strings.Contains(err.Error(), path) {
+			t.Errorf("missing-path error: %v", err)
 		}
-	}
-	if _, err := store.ReadRaw("notes/note.md", -1); !errors.Is(err, fs.ErrNotExist) || strings.Contains(err.Error(), path) {
-		t.Errorf("ReadRaw should return the original missing-path error: %v", err)
 	}
 	put(t, root, path, "%% #bobik: draft %%")
 	for _, op := range []func() error{
@@ -250,29 +137,5 @@ func TestMutationsAndHints(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, path)); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("deleted path remains: %v", err)
-	}
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	if err := store.Walk(ctx, func(string, fs.FileInfo) error { return nil }); !errors.Is(err, context.Canceled) {
-		t.Errorf("canceled walk: %v", err)
-	}
-}
-
-func TestWalkBudgetCountsIneligibleEntries(t *testing.T) {
-	root := t.TempDir()
-	put(t, root, "one.txt", "hidden by policy")
-	put(t, root, "two.txt", "hidden by policy")
-	store := openStore(t, "*.md", root)
-	a, err := store.snapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer unix.Close(a.fd)
-	err = a.walk(t.Context(), 1, func(string, fs.FileInfo) error {
-		t.Error("unexpected visit")
-		return nil
-	})
-	if !errors.Is(err, errWalkBudget) {
-		t.Errorf("walk budget should include rejected candidates, got %v", err)
 	}
 }

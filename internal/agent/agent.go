@@ -38,21 +38,19 @@ type VisionClient interface {
 }
 
 type Config struct {
-	// CWD must be the same directory passed when opening Notes.
-	CWD                           string
-	PromptPath, Prompt, AllowPath string
-	Model, VisionModel, LogPath   string
-	Trigger                       string
-	ChangedFiles                  []ChangedFile
-	InitialRun                    bool
-	Now                           time.Time
-	MaxSteps                      int
-	Timeout                       time.Duration
-	Notes                         *notes.Store
-	ModelClient                   ModelClient
-	VisionClient                  VisionClient
-	Verbose                       io.Writer
-	// OnWrite receives the absolute CWD-based path after a successful mutation,
+	PromptPath, Prompt string
+	Model, VisionModel string
+	Trigger            string
+	ChangedFiles       []ChangedFile
+	InitialRun         bool
+	Now                time.Time
+	MaxSteps           int
+	Timeout            time.Duration
+	Notes              *notes.Store
+	ModelClient        ModelClient
+	VisionClient       VisionClient
+	Verbose            io.Writer
+	// OnWrite receives the absolute path after a successful typed mutation,
 	// including deletion, before writing the tool result to the audit.
 	OnWrite func(string)
 }
@@ -66,7 +64,7 @@ type Summary struct {
 	Text         string
 	Steps        int
 	FilesWritten int
-	// WrittenPaths is sorted, deduplicated, and relative to CWD.
+	// WrittenPaths contains only typed mutations, relative to the vault.
 	WrittenPaths    []string
 	Usage           fireworks.Usage
 	DurationMs      int64
@@ -80,14 +78,6 @@ func Run(parent context.Context, cfg Config) (summary Summary, runErr error) {
 	start := time.Now()
 	if cfg.Notes == nil || cfg.ModelClient == nil {
 		return summary, errors.New("notes store and model client are required")
-	}
-	if cfg.CWD == "" {
-		return summary, errors.New("agent working directory is required")
-	}
-	var err error
-	cfg.CWD, err = filepath.Abs(cfg.CWD)
-	if err != nil {
-		return summary, fmt.Errorf("resolve working directory: %w", err)
 	}
 	if cfg.Now.IsZero() {
 		cfg.Now = start.In(hostTimeZone())
@@ -107,7 +97,7 @@ func Run(parent context.Context, cfg Config) (summary Summary, runErr error) {
 	ctx, cancel := context.WithTimeout(parent, cfg.Timeout)
 	defer cancel()
 
-	log, err := audit.New(cfg.CWD, cfg.LogPath, cfg.Now)
+	log, err := audit.New(cfg.Notes.Base(), "", cfg.Now)
 	if err != nil {
 		return summary, fmt.Errorf("could not create the audit log: %w", err)
 	}
@@ -140,20 +130,13 @@ func Run(parent context.Context, cfg Config) (summary Summary, runErr error) {
 
 	if err := log.Event("run-start", map[string]any{
 		"flags": map[string]any{
-			"prompt": cfg.PromptPath, "allowPath": cfg.AllowPath, "deny": []string{},
+			"prompt": cfg.PromptPath, "vault": cfg.Notes.Base(), "directories": cfg.Notes.Rules(),
 			"model": cfg.Model, "visionModel": cfg.VisionModel,
 		},
-		"cwd": cfg.CWD, "dateTime": cfg.Now.UTC().Format("2006-01-02T15:04:05.000Z"),
+		"dateTime":      cfg.Now.UTC().Format("2006-01-02T15:04:05.000Z"),
 		"localDateTime": localDateTime(cfg.Now), "timeZone": cfg.Now.Location().String(),
 	}); err != nil {
 		return summary, err
-	}
-	// Notes always reserves the default directory; do not accumulate one
-	// exclusion per generated log in a long-running watch process.
-	if cfg.LogPath != "" {
-		if err := cfg.Notes.SetAuditPath(log.Path); err != nil {
-			return summary, fmt.Errorf("could not exclude the audit log from the notes store: %w", err)
-		}
 	}
 	cfg.Notes.SetTrigger(cfg.Trigger)
 	if err := state.loop(ctx, &summary); err != nil {
@@ -284,10 +267,11 @@ func (s *runState) processStep(ctx context.Context, step int, finish string, msg
 }
 
 func (s *runState) recordWrite(path string) {
+	root := s.cfg.Notes.Base()
 	if !filepath.IsAbs(path) {
-		path = filepath.Join(s.cfg.CWD, path)
+		path = filepath.Join(root, path)
 	}
-	if rel, err := filepath.Rel(s.cfg.CWD, path); err == nil {
+	if rel, err := filepath.Rel(root, path); err == nil {
 		s.written[rel] = struct{}{}
 	}
 	if s.cfg.OnWrite != nil {

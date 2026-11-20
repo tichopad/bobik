@@ -3,10 +3,12 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/tichopad/bobik/internal/notes"
 	"golang.org/x/sys/unix"
 )
 
@@ -89,7 +91,7 @@ func TestReadRegularRejectsFIFOAndOversize(t *testing.T) {
 }
 
 func TestRunOptions(t *testing.T) {
-	base := []string{"--prompt", "prompt.md", "--allow-path", "notes/**/*.md"}
+	base := []string{"--prompt", "prompt.md", "--vault", "notes"}
 	o, err := parseOptions(append(base, "--model=id", "--watch-delay", "0.5", "--max-steps=2"))
 	if err != nil || o.model != "id" || o.visionModel != "id" || o.quietPeriod != 500*time.Millisecond || o.steps != 2 {
 		t.Fatalf("options %+v: %v", o, err)
@@ -113,5 +115,21 @@ func TestRunOptions(t *testing.T) {
 		if _, err := parseOptions(append(base, tc.args...)); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%v: expected %q, got %v", tc.args, tc.want, err)
 		}
+	}
+}
+
+func TestRepeatableVaultRules(t *testing.T) {
+	o, err := parseOptions([]string{
+		"--prompt", "prompt.md", "--vault", "vault", "--hide", ".obsidian",
+		"--read-only=Archive", "--hide", "Private Notes", "--pin", "Projects",
+	})
+	want := []notes.Rule{
+		{Path: ".obsidian", Mode: notes.Hide},
+		{Path: "Archive", Mode: notes.ReadOnly},
+		{Path: "Private Notes", Mode: notes.Hide},
+		{Path: "Projects", Mode: notes.Pin},
+	}
+	if err != nil || o.vault != "vault" || !slices.Equal(o.rules, want) {
+		t.Fatalf("options %+v: %v", o, err)
 	}
 }

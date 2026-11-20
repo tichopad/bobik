@@ -45,18 +45,18 @@ func New(cwd, path string, now time.Time) (*Log, error) {
 	if name == "" {
 		return nil, errors.New("audit log path must name a file")
 	}
-	openDir := func(fd int, name string) (int, error) {
+	openDir := func(fd int, name string, resolve uint64) (int, error) {
 		return unix.Openat2(fd, name, &unix.OpenHow{
 			Flags:   unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC,
-			Resolve: unix.RESOLVE_NO_SYMLINKS,
+			Resolve: unix.RESOLVE_NO_SYMLINKS | resolve,
 		})
 	}
 	var dirFD int
 	if explicit {
-		dirFD, err = openDir(unix.AT_FDCWD, filepath.Dir(path))
+		dirFD, err = openDir(unix.AT_FDCWD, filepath.Dir(path), 0)
 	} else {
 		// Create the reserved directory relative to an already pinned CWD.
-		cwdFD, openErr := openDir(unix.AT_FDCWD, cwd)
+		cwdFD, openErr := openDir(unix.AT_FDCWD, cwd, 0)
 		if openErr != nil {
 			return nil, &fs.PathError{Op: "open working directory", Path: cwd, Err: openErr}
 		}
@@ -64,7 +64,7 @@ func New(cwd, path string, now time.Time) (*Log, error) {
 		if err := unix.Mkdirat(cwdFD, Directory, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
 			return nil, &fs.PathError{Op: "create audit directory", Path: dir, Err: err}
 		}
-		dirFD, err = openDir(cwdFD, Directory)
+		dirFD, err = openDir(cwdFD, Directory, unix.RESOLVE_BENEATH|unix.RESOLVE_NO_XDEV)
 	}
 	if err != nil {
 		return nil, &fs.PathError{Op: "open audit directory", Path: dir, Err: err}

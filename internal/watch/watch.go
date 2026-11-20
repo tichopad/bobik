@@ -22,7 +22,7 @@ import (
 const DefaultQuietPeriod = 60 * time.Second
 
 type Config struct {
-	Root, PromptFile, Trigger string
+	PromptFile, Trigger string
 	// QuietPeriod is the time since the most recent relevant edit. Zero disables it.
 	QuietPeriod time.Duration
 	Notes       *notes.Store
@@ -119,11 +119,7 @@ func run(ctx context.Context, cfg Config, timings timings) error {
 	if cfg.Notes == nil || cfg.Run == nil {
 		return errors.New("watch requires a note store and a run callback")
 	}
-	root, err := filepath.Abs(cfg.Root)
-	if err != nil {
-		return err
-	}
-	cfg.Root = root
+	root := cfg.Notes.Base()
 	cfg.PromptFile = absolute(root, cfg.PromptFile)
 	if cfg.ReadPrompt == nil {
 		cfg.ReadPrompt = func() (string, error) { return readPrompt(cfg.PromptFile) }
@@ -138,14 +134,14 @@ func run(ctx context.Context, cfg Config, timings timings) error {
 		fmt.Fprintf(cfg.Stderr, "bobik: "+format+"\n", args...)
 	}
 
-	src, err := newSource(ctx, root, cfg.Notes)
+	src, err := newSource(ctx, cfg.Notes)
 	if err != nil {
 		return fmt.Errorf("start watcher: %w", err)
 	}
 	defer src.Close()
 
 	state := newSchedule(cfg.QuietPeriod, timings.retry)
-	report("watching %s for changes matching %q", src.base, cfg.Trigger)
+	report("watching %s for changes matching %q", root, cfg.Trigger)
 	results := make(chan result, 1)
 	var active *runInfo
 	var stopping bool
@@ -295,6 +291,9 @@ func run(ctx context.Context, cfg Config, timings timings) error {
 			if !ok {
 				stopErr = errors.New("file watcher stopped unexpectedly")
 				stopWatching()
+			} else if event.Name == root && (event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename)) {
+				stopErr = errors.New("vault root was removed or moved")
+				stopWatching()
 			} else if err := src.event(event, queue); err != nil {
 				report("watcher error: %v", err)
 			}
@@ -351,7 +350,7 @@ const maxWatchedNoteBytes = 16 << 20
 const maxPromptBytes = 1 << 20
 
 func readNote(store *notes.Store, path string) ([]byte, error) {
-	return store.ReadRaw(path, maxWatchedNoteBytes)
+	return store.Read(path, maxWatchedNoteBytes)
 }
 
 func readPrompt(path string) (string, error) {

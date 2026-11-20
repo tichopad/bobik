@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -45,7 +44,7 @@ var tools = []tool{
 		pathField, {name: "oldString", required: true, nonempty: true}, {name: "newString", required: true}, {name: "replaceAll", boolean: true},
 	}},
 	{"deleteFile", "Delete one allowed note. This does not delete directories.", []field{pathField}},
-	{"bash", "Run Bash against a filtered, read-only copy of the allowed files. Returns bounded stdout, stderr, and exit status.", []field{{name: "command", required: true}}},
+	{"bash", "Run Bash offline in the live vault. Changes persist even on failure. Returns bounded stdout, stderr, and exit status.", []field{{name: "command", required: true}}},
 	{"viewMedia", "Inspect an allowed PNG, JPEG, WebP, or GIF image up to 10 MiB. Only local file paths are accepted. Returns plain-text analysis, not image bytes.", []field{pathField, {name: "prompt"}}},
 }
 
@@ -227,9 +226,12 @@ func (s *runState) dispatch(ctx context.Context, call fireworks.Call, input map[
 		}
 		s.recordWrite(path)
 	case "bash":
-		result, err := sandbox.Run(ctx, shellSource{s.cfg.Notes}, text("command"))
+		result, err := sandbox.Run(ctx, s.cfg.Notes.Base(), shellMounts(s.cfg), text("command"))
 		if errors.Is(err, sandbox.ErrUnavailable) {
-			return nil, errors.New("Bash sandbox unavailable; commands are never run without isolation. Ask the operator to check Bubblewrap, its runtime dependencies, and the host namespace policy"), nil
+			if auditErr := s.log.Event("sandbox-unavailable", map[string]any{"toolCallId": call.ID, "error": err.Error()}); auditErr != nil {
+				return nil, nil, auditErr
+			}
+			return nil, errors.New("Bash sandbox unavailable; commands are never run without isolation. Ask the operator to check the audit log and run bobik check-sandbox"), nil
 		}
 		if err != nil {
 			return nil, err, nil
@@ -282,8 +284,7 @@ func jsonStringPrefix(text string, budget int) string {
 	return text[:boundary(n)]
 }
 
-// Typed tools keep the legacy virtual-root path convention; the notes store
-// independently validates the remaining CWD-relative path.
+// Typed tools use a virtual root, not absolute host paths.
 func notePath(path string) string {
 	if filepath.IsAbs(path) {
 		return strings.TrimLeft(path, "/")
@@ -291,13 +292,20 @@ func notePath(path string) string {
 	return path
 }
 
-type shellSource struct{ *notes.Store }
-
-// Walk supplies paths relative to Base. Read those same names from Base, not
-// from the working directory used by the typed tools.
-func (s shellSource) Read(name string, limit int64) ([]byte, error) {
-	if !fs.ValidPath(name) || name == "." {
-		return nil, notes.ErrNotAllowed
+func shellMounts(cfg Config) []sandbox.Mount {
+	rules := cfg.Notes.Rules()
+	mounts := make([]sandbox.Mount, 0, len(rules))
+	for _, rule := range rules {
+		var mode sandbox.MountMode
+		switch rule.Mode {
+		case notes.Hide:
+			mode = sandbox.Hide
+		case notes.ReadOnly:
+			mode = sandbox.ReadOnly
+		case notes.Pin:
+			mode = sandbox.Pin
+		}
+		mounts = append(mounts, sandbox.Mount{Path: rule.Path, Mode: mode})
 	}
-	return s.Store.ReadRaw(filepath.Join(s.Base(), name), limit)
+	return mounts
 }

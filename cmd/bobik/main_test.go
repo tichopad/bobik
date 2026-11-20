@@ -23,6 +23,9 @@ import (
 func cliFixture(t *testing.T, server *httptest.Server) (app, string, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
 	cwd := t.TempDir()
+	if err := os.Mkdir(filepath.Join(cwd, "vault"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(cwd, "prompt"), []byte("Maintain test notes."), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -83,16 +86,16 @@ func TestCLICompletionThroughHTTPAndAudit(t *testing.T) {
 	}))
 	defer server.Close()
 	a, cwd, stdout, stderr := cliFixture(t, server)
-	if got := a.run([]string{"--prompt", "prompt", "--allow-path", "*.md", "--model", "test-model"}); got != 0 {
+	if got := a.run([]string{"--prompt", "prompt", "--vault", "vault", "--model", "test-model"}); got != 0 {
 		t.Fatalf("exit %d, stderr %s", got, stderr)
 	}
 	if stdout.String() != "Created a note.\n" || !strings.Contains(stderr.String(), "2 steps, 1 file written, 18 tokens") {
 		t.Fatalf("stdout %q, stderr %q", stdout, stderr)
 	}
-	if b, err := os.ReadFile(filepath.Join(cwd, "new.md")); string(b) != "# New note\n" || err != nil {
+	if b, err := os.ReadFile(filepath.Join(cwd, "vault", "new.md")); string(b) != "# New note\n" || err != nil {
 		t.Fatalf("written note %q, error %v", b, err)
 	}
-	logs, err := filepath.Glob(filepath.Join(cwd, ".agent-bobik", "*.jsonl"))
+	logs, err := filepath.Glob(filepath.Join(cwd, "vault", ".agent-bobik", "*.jsonl"))
 	if err != nil || len(logs) != 1 {
 		t.Fatalf("logs %v, error %v", logs, err)
 	}
@@ -124,7 +127,7 @@ func TestCLIRuntimeFailureStillReportsAudit(t *testing.T) {
 	}))
 	defer server.Close()
 	a, _, stdout, stderr := cliFixture(t, server)
-	if got := a.run([]string{"--prompt=prompt", "--allow-path=*.md"}); got != exitRunError {
+	if got := a.run([]string{"--prompt=prompt", "--vault=vault"}); got != exitRunError {
 		t.Fatalf("exit %d, stderr %s", got, stderr)
 	}
 	if stdout.Len() != 0 || !strings.Contains(stderr.String(), ".agent-bobik/") || strings.Contains(stderr.String(), "secret raw") {
@@ -133,35 +136,45 @@ func TestCLIRuntimeFailureStillReportsAudit(t *testing.T) {
 }
 
 func TestCLIConfigIsNotAReadableNote(t *testing.T) {
-	var requests atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch requests.Add(1) {
-		case 1:
-			fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"read","type":"function","function":{"name":"readFile","arguments":"{\"path\":\"config/bobik/config.json\"}"}}]},"finish_reason":"tool_calls"}]}`)
-		case 2:
-			b, err := io.ReadAll(r.Body)
-			if err != nil || bytes.Contains(b, []byte("cfg-secret")) || !bytes.Contains(b, []byte("not allowed")) {
-				t.Error("saved API key was not safely excluded")
-			}
-			fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}`)
-		default:
-			t.Error("unexpected additional model request")
-			w.WriteHeader(http.StatusBadRequest)
-		}
-	}))
-	defer server.Close()
-	a, cwd, _, stderr := cliFixture(t, server)
+	a, cwd, _, stderr := cliFixture(t, nil)
 	a.getenv = func(k string) string {
 		if k == "XDG_CONFIG_HOME" {
-			return filepath.Join(cwd, "config")
+			return filepath.Join(cwd, "vault", "config")
 		}
 		return ""
 	}
 	if _, err := saveKey("cfg-secret", a.getenv); err != nil {
 		t.Fatal(err)
 	}
-	if code := a.run([]string{"--prompt=prompt", "--allow-path=**/*.json"}); code != 0 || requests.Load() != 2 {
+	if code := a.run([]string{"--prompt=prompt", "--vault=vault"}); code != exitUsage ||
+		!strings.Contains(stderr.String(), "saved API key configuration must be outside") || strings.Contains(stderr.String(), "cfg-secret") {
 		t.Fatalf("exit %d, stderr %s", code, stderr)
+	}
+}
+
+func TestCLIRejectsSymlinkedPrivateFilesInsideVault(t *testing.T) {
+	a, cwd, _, stderr := cliFixture(t, nil)
+	vault := filepath.Join(cwd, "vault")
+	if err := os.WriteFile(filepath.Join(vault, "private"), []byte("private"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(vault, "private"), filepath.Join(cwd, "linked-prompt")); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.run([]string{"--prompt=linked-prompt", "--vault=vault"}); got != exitUsage ||
+		!strings.Contains(stderr.String(), "prompt must be outside the vault") {
+		t.Fatalf("exit %d, stderr %s", got, stderr)
+	}
+
+	config := filepath.Join(cwd, "config", "bobik")
+	if err := os.MkdirAll(config, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(vault, "private"), filepath.Join(config, "config.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkKeyLocation(vault, filepath.Join(config, "config.json")); err == nil {
+		t.Fatal("allowed a key stored through a symlink into the vault")
 	}
 }
 
@@ -172,8 +185,9 @@ func TestCLIMigrationAndUsage(t *testing.T) {
 		want string
 	}{
 		{[]string{"--deny", "rm"}, "was removed"},
-		{[]string{"--prompt", "absent", "--allow-path", "*.md"}, "prompt file not found"},
-		{[]string{"--prompt", "prompt", "--allow-path", "../*.md"}, "allow"},
+		{[]string{"--allow-path", "*.md"}, "was removed"},
+		{[]string{"--prompt", "absent", "--vault", "vault"}, "prompt file not found"},
+		{[]string{"--prompt", "prompt", "--vault", "vault", "--hide", "../outside"}, "vault rule"},
 	} {
 		stderr.Reset()
 		if got := a.run(tc.args); got != exitUsage || !strings.Contains(stderr.String(), tc.want) || stdout.Len() != 0 {
@@ -205,7 +219,7 @@ func TestCLIWatchSignals(t *testing.T) {
 			signals := make(chan os.Signal, 2)
 			a.signals = signals
 			done := make(chan int, 1)
-			go func() { done <- a.run([]string{"--prompt=prompt", "--allow-path=*.md", "--watch"}) }()
+			go func() { done <- a.run([]string{"--prompt=prompt", "--vault=vault", "--watch"}) }()
 			select {
 			case <-started:
 			case <-time.After(5 * time.Second):
@@ -229,7 +243,7 @@ func TestCLIWatchSignals(t *testing.T) {
 	}
 }
 
-func TestCLIWatchReloadsPromptAndReportsCWDRelativeChanges(t *testing.T) {
+func TestCLIWatchReloadsPromptAndReportsVaultRelativeChanges(t *testing.T) {
 	var count atomic.Int32
 	requests := make(chan string, 4)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -255,14 +269,11 @@ func TestCLIWatchReloadsPromptAndReportsCWDRelativeChanges(t *testing.T) {
 	defer server.Close()
 	a, cwd, stdout, stderr := cliFixture(t, server)
 	dir := filepath.Join(cwd, "vault")
-	if err := os.Mkdir(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
 	signals := make(chan os.Signal, 2)
 	a.signals = signals
 	done := make(chan int, 1)
 	go func() {
-		done <- a.run([]string{"--prompt=prompt", "--allow-path=vault/*.md", "--watch", "--watch-delay=0"})
+		done <- a.run([]string{"--prompt=prompt", "--vault=vault", "--watch", "--watch-delay=0"})
 	}()
 	stopped := false
 	defer func() {
@@ -301,7 +312,7 @@ func TestCLIWatchReloadsPromptAndReportsCWDRelativeChanges(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "submission.md"), []byte("#bobik: Ready.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := nextRequest(); !strings.HasPrefix(got, "Reloaded instructions.") || !strings.Contains(got, "vault/submission.md") {
+	if got := nextRequest(); !strings.HasPrefix(got, "Reloaded instructions.") || !strings.Contains(got, "\nsubmission.md") {
 		t.Fatalf("wrong watch prompt: %q", got)
 	}
 	signals <- syscall.SIGTERM

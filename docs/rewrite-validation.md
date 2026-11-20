@@ -28,9 +28,10 @@ Markdown code, nested containers, line endings, and default/custom triggers.
 3. Use a disposable vault and a live Fireworks key to verify tool calls,
    reasoning/usage, and strict no-fallback vision with the selected model.
    Include an image near the 10 MiB local limit; encoding adds size.
-4. Compare idle watch RSS/PSS, no-tool completion, repeated staged searches,
+4. Compare idle watch RSS/PSS, no-tool completion, repeated shell calls,
    and a large image on the same corpus. Use a fresh cgroup's `memory.peak`
-   per workload to include shell children and staging effects. Set hard job
+   per workload to include shell children. Set hard job
    budgets from deployment measurements, not process RSS alone.
-5. Review private prompts, cron entries, and scripts for `--deny`, shell
-   writes, and utilities not included in the new runtime before deploying.
+5. Review private prompts, cron entries, and scripts for `--allow-path`,
+   `--deny`, and assumptions about shell writes. Verify the chosen vault
+   and directory exceptions with a disposable copy before deploying.
