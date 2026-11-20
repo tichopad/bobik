@@ -16,8 +16,8 @@ import (
 )
 
 type mountEntry struct {
-	device, root, point, fsType         string
-	readOnly, nodev, nosuid, nonPrivate bool
+	device, root, point, fsType     string
+	readOnly, nodev, nosuid, shared bool
 }
 
 var mountUnescape = strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`)
@@ -42,12 +42,10 @@ func readMounts(path string) ([]mountEntry, error) {
 			fsType: f[sep+1], readOnly: slices.Contains(opts, "ro"),
 			nodev: slices.Contains(opts, "nodev"), nosuid: slices.Contains(opts, "nosuid"),
 		}
-		for _, field := range f[6:sep] {
-			if strings.HasPrefix(field, "shared:") || strings.HasPrefix(field, "master:") ||
-				strings.HasPrefix(field, "propagate_from:") {
-				m.nonPrivate = true
-			}
-		}
+		// Slave mounts can receive host mount events but cannot send them back.
+		m.shared = slices.ContainsFunc(f[6:sep], func(field string) bool {
+			return strings.HasPrefix(field, "shared:")
+		})
 		mounts = append(mounts, m)
 	}
 	return mounts, scanner.Err()
@@ -188,8 +186,8 @@ func checkPrivateCoordinates(mounts []mountEntry, exposed []string, path string)
 	return nil
 }
 
-// Bubblewrap's bind mounts are recursive. Verify the child's final, private
-// mount namespace before releasing it; a host mountinfo snapshot isn't enough.
+// Bubblewrap's bind mounts are recursive. Verify the child's final mount table
+// before releasing it; a host mountinfo snapshot isn't enough.
 func verifySandbox(ctx context.Context, pid int, profile runtimeProfile, notes notesProfile) error {
 	proc, err := os.Open("/proc/" + strconv.Itoa(pid))
 	if err != nil {
@@ -318,7 +316,7 @@ func verifyMountTable(mounts []mountEntry, profile runtimeProfile, notes notesPr
 	}
 	for _, m := range mounts {
 		want, ok := expected[m.point]
-		if !ok || m.nonPrivate || m.readOnly != want.readOnly || !m.nosuid || m.point != "/dev/null" && !m.nodev {
+		if !ok || m.shared || m.readOnly != want.readOnly || !m.nosuid || m.point != "/dev/null" && !m.nodev {
 			return fmt.Errorf("unexpected or unsafe sandbox mount at %s", m.point)
 		}
 		if want.mask != nil && m.fsType != "tmpfs" {

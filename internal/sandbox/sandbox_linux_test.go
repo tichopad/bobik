@@ -48,6 +48,19 @@ func TestLaunchFailsClosed(t *testing.T) {
 	}
 }
 
+func TestLaunchIncludesSetupStderrInError(t *testing.T) {
+	launcher := filepath.Join(t.TempDir(), "launcher")
+	const diagnostic = "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted"
+	script := "#!/bin/sh\nprintf '%s\\n' '" + diagnostic + "' >&2\nexit 1\n"
+	if err := os.WriteFile(launcher, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	result, err := launch(t.Context(), runtimeProfile{prlimit: launcher}, notesProfile{}, "printf wrong")
+	if !errors.Is(err, ErrUnavailable) || !strings.Contains(err.Error(), diagnostic) || result.Stdout != "" {
+		t.Fatalf("launch = %+v, %v; want setup diagnostic and no shell run", result, err)
+	}
+}
+
 func TestCappedOutput(t *testing.T) {
 	var out cappedOutput
 	for _, size := range []int{maxOutput, 1, 4096} {

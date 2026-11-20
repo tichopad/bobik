@@ -29,7 +29,7 @@ Usage:
   bobik --help | --version
 
 Options:
-  --prompt <path>          Markdown instructions outside the vault (required)
+  --prompt <path>          Markdown instructions inside or outside the vault (required)
   --vault <directory>      Live notes directory (required)
   --hide <directory>       Hide a vault-relative directory (repeatable)
   --read-only <directory>  Allow reading but not writing (repeatable)

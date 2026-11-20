@@ -73,9 +73,6 @@ if (printf no >readonly/file) 2>/dev/null; then exit 1; fi
 printf 'bobik-preflight\n'`
 	result, err := Run(ctx, vault, []Mount{{"hidden", Hide}, {"pinned", Pin}, {"readonly", ReadOnly}}, command)
 	if err != nil {
-		if result.Stderr != "" {
-			return fmt.Errorf("%w: %s", err, strings.TrimSpace(result.Stderr))
-		}
 		return err
 	}
 	if result.ExitCode != 0 || result.Stdout != "bobik-preflight\n" {
@@ -203,6 +200,9 @@ func launch(ctx context.Context, profile runtimeProfile, notes notesProfile, com
 		return result, ctxErr
 	}
 	if setupErr != nil {
+		if diagnostic := strings.TrimSpace(result.Stderr); diagnostic != "" {
+			setupErr = fmt.Errorf("%w: %s", setupErr, diagnostic)
+		}
 		return result, executionError(ctx, setupErr)
 	}
 	exitCode, err := childExitStatus(status, decoder)

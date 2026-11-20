@@ -51,12 +51,17 @@ bobik set-api-key fw-your-key-here
 This replaces `$XDG_CONFIG_HOME/bobik/config.json` with a mode-`0600` file (the
 default location is `~/.config/bobik/config.json`). A nonblank
 `FIREWORKS_API_KEY` takes precedence. Bobik does not load `.env` files.
-Keep the saved key and trusted prompt outside the vault and out of system
-directories exposed to Bash.
+Keep the saved key outside the vault and out of system directories exposed to
+Bash. The prompt can live inside the vault, where normal vault rules apply.
+To keep its source file out of reach of the agent's tools, put it in a directory
+such as `Agent/Preferences` and pass `--hide Agent/Preferences`. Bobik still
+loads the prompt and sends its text to the model. In-vault prompt paths cannot
+use symlinks. An outside prompt must stay outside the vault and Bash's system
+directories.
 
 | Flag | Meaning |
 | --- | --- |
-| `--prompt <path>` | Required Markdown instructions outside the vault. |
+| `--prompt <path>` | Required Markdown instructions inside or outside the vault. |
 | `--vault <dir>` | Required existing directory. Choose only a tree you trust the agent to edit. |
 | `--hide <dir>` | Hide a vault-relative directory's contents. Repeatable. |
 | `--read-only <dir>` | Allow reads but prevent changes under a vault-relative directory. Repeatable. |
@@ -98,6 +103,9 @@ Bobik checks the visible vault's metadata before each shell call rather than
 copying note contents. Submounts, links, and special files can prevent the
 sandbox from starting. Bash cannot create links or special files.
 Don't move protected directories from the host while Bobik is running.
+Host mount changes can enter the sandbox after its startup checks, so don't
+mount or unmount filesystems under the vault or exposed system paths during a
+Bash call.
 
 Obsidian Sync sees changes as ordinary local edits. There is no rollback or
 isolation from concurrent Sync writes: even a failed or timed-out command
@@ -137,7 +145,8 @@ A changed or created Markdown file triggers only if its content
 changed and has a ready trigger. Untagged edits do not reset the quiet period.
 Deleted paths are included in the next triggered run but do not trigger their
 own run. The model gets the change set and run time separately from the prompt
-instructions, which are reloaded from disk before each run.
+instructions, which are reloaded from disk before each run, including changes
+made by the agent. Editing the prompt does not have a special trigger.
 
 Draft a request inside an Obsidian comment, then uncomment to submit:
 

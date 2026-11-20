@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/tichopad/bobik/internal/fireworks"
+	"github.com/tichopad/bobik/internal/notes"
 )
 
 func cliFixture(t *testing.T, server *httptest.Server) (app, string, *bytes.Buffer, *bytes.Buffer) {
@@ -162,7 +163,7 @@ func TestCLIRejectsSymlinkedPrivateFilesInsideVault(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := a.run([]string{"--prompt=linked-prompt", "--vault=vault"}); got != exitUsage ||
-		!strings.Contains(stderr.String(), "prompt must be outside the vault") {
+		!strings.Contains(stderr.String(), "must not resolve into the vault") {
 		t.Fatalf("exit %d, stderr %s", got, stderr)
 	}
 
@@ -175,6 +176,54 @@ func TestCLIRejectsSymlinkedPrivateFilesInsideVault(t *testing.T) {
 	}
 	if err := checkKeyLocation(vault, filepath.Join(config, "config.json")); err == nil {
 		t.Fatal("allowed a key stored through a symlink into the vault")
+	}
+}
+
+func TestReadVaultPrompt(t *testing.T) {
+	_, cwd, _, _ := cliFixture(t, nil)
+	vault := filepath.Join(cwd, "vault")
+	dir := filepath.Join(vault, "private")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "prompt.md")
+	if err := os.Rename(filepath.Join(cwd, "prompt"), path); err != nil {
+		t.Fatal(err)
+	}
+	store, err := notes.NewVault(vault, []notes.Rule{{Path: "private", Mode: notes.Hide}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if got, err := readPrompt(store, path); err != nil || got != "Maintain test notes." {
+		t.Fatalf("hidden prompt = %q, %v", got, err)
+	}
+	if _, err := store.Read(path, promptLimit); err == nil {
+		t.Fatal("agent can read the hidden prompt file")
+	}
+	if err := store.Write(path, []byte("changed")); err == nil {
+		t.Fatal("agent can write the hidden prompt file")
+	}
+
+	outside := filepath.Join(cwd, "outside.md")
+	if err := os.Rename(path, outside); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "regular.md"), []byte("another prompt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, link := range []struct{ target, name string }{
+		{outside, path},
+		{dir, filepath.Join(vault, "linked-dir")},
+	} {
+		if err := os.Symlink(link.target, link.name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{path, filepath.Join(vault, "linked-dir", "regular.md")} {
+		if _, err := readPrompt(store, name); err == nil {
+			t.Fatalf("read prompt through symlink: %s", name)
+		}
 	}
 }
 
@@ -254,6 +303,11 @@ func TestCLIWatchReloadsPromptAndReportsVaultRelativeChanges(t *testing.T) {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
+		call := count.Add(1)
+		if call == 2 {
+			fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"run 1"},"finish_reason":"stop"}]}`)
+			return
+		}
 		for _, msg := range req.Messages {
 			if msg.Role == "user" {
 				select {
@@ -264,16 +318,23 @@ func TestCLIWatchReloadsPromptAndReportsVaultRelativeChanges(t *testing.T) {
 				break
 			}
 		}
-		fmt.Fprintf(w, `{"choices":[{"message":{"role":"assistant","content":"run %d"},"finish_reason":"stop"}]}`, count.Add(1))
+		if call == 1 {
+			fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"edit","type":"function","function":{"name":"writeFile","arguments":"{\"path\":\"prompt.md\",\"content\":\"Reloaded instructions.\"}"}}]},"finish_reason":"tool_calls"}]}`)
+		} else {
+			fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"run 2"},"finish_reason":"stop"}]}`)
+		}
 	}))
 	defer server.Close()
 	a, cwd, stdout, stderr := cliFixture(t, server)
 	dir := filepath.Join(cwd, "vault")
+	if err := os.Rename(filepath.Join(cwd, "prompt"), filepath.Join(dir, "prompt.md")); err != nil {
+		t.Fatal(err)
+	}
 	signals := make(chan os.Signal, 2)
 	a.signals = signals
 	done := make(chan int, 1)
 	go func() {
-		done <- a.run([]string{"--prompt=prompt", "--vault=vault", "--watch", "--watch-delay=0"})
+		done <- a.run([]string{"--prompt=vault/prompt.md", "--vault=vault", "--watch", "--watch-delay=0"})
 	}()
 	stopped := false
 	defer func() {
@@ -305,9 +366,6 @@ func TestCLIWatchReloadsPromptAndReportsVaultRelativeChanges(t *testing.T) {
 	}
 	if got := nextRequest(); !strings.Contains(got, "initial run") {
 		t.Fatalf("missing initial watch context: %q", got)
-	}
-	if err := os.WriteFile(filepath.Join(cwd, "prompt"), []byte("Reloaded instructions."), 0o600); err != nil {
-		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "submission.md"), []byte("#bobik: Ready.\n"), 0o600); err != nil {
 		t.Fatal(err)

@@ -99,7 +99,7 @@ func TestInspectVaultRejectsAliasesAndIPC(t *testing.T) {
 	}
 }
 
-func TestMountTableRejectsExtraAndPropagatedMounts(t *testing.T) {
+func TestMountTableRejectsExtraAndSharedMounts(t *testing.T) {
 	profile := runtimeProfile{binds: map[string]string{"/usr/bin": "/usr/bin"}}
 	mask, err := os.Open(t.TempDir())
 	if err != nil {
@@ -130,14 +130,45 @@ func TestMountTableRejectsExtraAndPropagatedMounts(t *testing.T) {
 			t.Fatalf("accepted unsafe mount table: %v", invalid)
 		}
 	}
-	good[3].nonPrivate = true
+	good[3].shared = true
 	if err := verifyMountTable(good, profile, notes); err == nil {
-		t.Fatal("accepted propagated notes mount")
+		t.Fatal("accepted shared notes mount")
 	}
-	good[3].nonPrivate = false
+	good[3].shared = false
 	good[3].fsType = "proc"
 	if err := verifyMountTable(good, profile, notes); err == nil {
 		t.Fatal("accepted a host procfs as the vault mount")
+	}
+}
+
+func TestMountTableAllowsInboundOnlyPropagation(t *testing.T) {
+	for _, tc := range []struct {
+		name, tags string
+		allowed    bool
+	}{
+		{"private", "", true},
+		{"slave", "master:1 ", true},
+		{"slave with visible ancestor", "master:1 propagate_from:2 ", true},
+		{"shared", "shared:3 ", false},
+		{"shared and slave", "shared:3 master:1 ", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "mountinfo")
+			data := "11 10 0:1 / / ro,nosuid,nodev - tmpfs tmpfs rw\n" +
+				"12 11 0:2 /null /dev/null rw,nosuid master:4 - devtmpfs udev rw\n" +
+				"13 11 0:3 /vault /notes rw,nosuid,nodev " + tc.tags + "- ext4 dev rw\n"
+			if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			mounts, err := readMounts(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			notes := notesProfile{wants: map[string]mountWant{"/notes": {}}}
+			if err := verifyMountTable(mounts, runtimeProfile{}, notes); (err == nil) != tc.allowed {
+				t.Fatalf("verifyMountTable = %v; want allowed=%t", err, tc.allowed)
+			}
+		})
 	}
 }
 

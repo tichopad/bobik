@@ -349,6 +349,25 @@ func (s *Store) Read(path string, limit int64) ([]byte, error) {
 	return data, nil
 }
 
+// ReadPrompt reads the operator-selected prompt, even in a hidden directory.
+// It is not an agent tool.
+func (s *Store) ReadPrompt(path string, limit int64) ([]byte, error) {
+	a, err := s.snapshot()
+	if err != nil {
+		return nil, pathError("read prompt", path, err)
+	}
+	defer unix.Close(a.fd)
+	rel, err := relativePath(a.root, path)
+	if err != nil {
+		return nil, pathError("read prompt", path, err)
+	}
+	data, _, err := readAt(a.fd, rel, limit)
+	if err != nil {
+		return nil, pathError("read prompt", path, err)
+	}
+	return data, nil
+}
+
 func (s *Store) Write(path string, data []byte) error {
 	return s.mutate("write", path, true, func(_ []byte) ([]byte, error) { return data, nil })
 }

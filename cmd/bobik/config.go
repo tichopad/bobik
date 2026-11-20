@@ -10,11 +10,39 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/tichopad/bobik/internal/notes"
 	"github.com/tichopad/bobik/internal/sandbox"
 	"golang.org/x/sys/unix"
 )
 
 const promptLimit = 1 << 20
+
+func readPrompt(store *notes.Store, path string) (string, error) {
+	var b []byte
+	var err error
+	if within(store.Base(), path) {
+		b, err = store.ReadPrompt(path, promptLimit)
+	} else {
+		resolved, resolveErr := filepath.EvalSymlinks(path)
+		if errors.Is(resolveErr, fs.ErrNotExist) {
+			return "", fmt.Errorf("prompt file not found: %s", path)
+		}
+		if resolveErr != nil {
+			return "", fmt.Errorf("resolve prompt file: %w", resolveErr)
+		}
+		if err := sandbox.CheckPrivatePath(store.Base(), resolved); err != nil {
+			return "", fmt.Errorf("a prompt specified outside the vault must not resolve into the vault or the shell's system directories: %w", err)
+		}
+		b, err = readRegular(resolved, promptLimit)
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", fmt.Errorf("prompt file not found: %s", path)
+	}
+	if err != nil {
+		return "", fmt.Errorf("could not read prompt file: %w", err)
+	}
+	return string(b), nil
+}
 
 type environment func(string) string
 

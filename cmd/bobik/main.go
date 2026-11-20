@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -94,26 +93,12 @@ func (a app) run(args []string) int {
 	}
 	vault := fromDirectory(cwd, o.vault)
 	promptPath := fromDirectory(cwd, o.prompt)
-	loadPrompt := func() (string, error) {
-		path, err := filepath.EvalSymlinks(promptPath)
-		if errors.Is(err, fs.ErrNotExist) {
-			return "", fmt.Errorf("prompt file not found: %s", promptPath)
-		}
-		if err != nil {
-			return "", fmt.Errorf("resolve prompt file: %w", err)
-		}
-		if within(vault, promptPath) {
-			return "", errors.New("prompt must be outside the vault")
-		}
-		if err := sandbox.CheckPrivatePath(vault, path); err != nil {
-			return "", fmt.Errorf("prompt must be outside the vault and the shell's system directories: %w", err)
-		}
-		b, err := readRegular(path, promptLimit)
-		if err != nil {
-			return "", fmt.Errorf("could not read prompt file: %w", err)
-		}
-		return string(b), nil
+	store, err := notes.NewVault(vault, o.rules)
+	if err != nil {
+		return a.fail(exitUsage, err)
 	}
+	defer store.Close()
+	loadPrompt := func() (string, error) { return readPrompt(store, promptPath) }
 	prompt, err := loadPrompt()
 	if err != nil {
 		return a.fail(exitUsage, err)
@@ -127,11 +112,6 @@ func (a app) run(args []string) int {
 	if err != nil {
 		return a.fail(exitUsage, err)
 	}
-	store, err := notes.NewVault(vault, o.rules)
-	if err != nil {
-		return a.fail(exitUsage, err)
-	}
-	defer store.Close()
 	client := a.client(key)
 	cfg := agent.Config{
 		PromptPath: promptPath, Trigger: o.trigger,
