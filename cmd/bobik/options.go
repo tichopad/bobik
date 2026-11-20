@@ -23,6 +23,7 @@ const help = `bobik — a single-purpose AI agent for Markdown notes
 Usage:
   bobik --prompt <path> --allow-path <glob> [options]
   bobik set-api-key <key>
+  bobik check-sandbox
   bobik --help | --version
 
 Options:
