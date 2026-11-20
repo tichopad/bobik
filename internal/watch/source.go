@@ -77,8 +77,9 @@ func (s *source) event(event fsnotify.Event, queue func(string)) error {
 		return nil
 	}
 	match, canDescend := s.store.WatchPath(path)
-	if topology && (canDescend || s.dirs[path] != nil) {
-		if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
+	wasDir := s.dirs[path] != nil
+	if topology && (canDescend || wasDir) {
+		if wasDir && (event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename)) {
 			s.detach(path)
 		}
 		if _, err := s.stat(path, unix.O_DIRECTORY); err == nil && canDescend {
@@ -91,12 +92,12 @@ func (s *source) event(event fsnotify.Event, queue func(string)) error {
 				}
 			})
 		}
-		if s.dirs[path] != nil {
+		if wasDir {
 			s.detach(path)
-		}
-		for name := range s.known {
-			if under(name, path) {
-				queue(name)
+			for name := range s.known {
+				if under(name, path) {
+					queue(name)
+				}
 			}
 		}
 	}

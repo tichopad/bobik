@@ -247,9 +247,6 @@ func run(ctx context.Context, cfg Config, timings timings) error {
 					}
 				}
 				work := state.take(now, func(path string) bool {
-					if _, err := src.statNote(path); err != nil {
-						return false
-					}
 					content, err := readNote(cfg.Notes, path)
 					return err == nil && notes.Analyze(string(content), cfg.Trigger).Ready
 				})
@@ -354,7 +351,7 @@ const maxWatchedNoteBytes = 16 << 20
 const maxPromptBytes = 1 << 20
 
 func readNote(store *notes.Store, path string) ([]byte, error) {
-	return store.Read(path, maxWatchedNoteBytes)
+	return store.ReadRaw(path, maxWatchedNoteBytes)
 }
 
 func readPrompt(path string) (string, error) {
