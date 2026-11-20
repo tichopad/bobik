@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
@@ -228,9 +229,20 @@ func readAt(dir int, path string, limit int64) ([]byte, unix.Stat_t, error) {
 	return data, st, err
 }
 
-// Read returns the bytes of an eligible regular file, without truncation. A
-// negative limit disables the byte limit; zero permits only an empty file.
+// Read behaves like ReadRaw and adds a bounded same-name hint for missing
+// files when possible.
 func (s *Store) Read(path string, limit int64) ([]byte, error) {
+	return s.read(path, limit, true)
+}
+
+// ReadRaw returns the bytes of an eligible regular file without truncation
+// or a directory search. A negative limit disables the byte limit; zero
+// permits only an empty file. A missing eligible path wraps fs.ErrNotExist.
+func (s *Store) ReadRaw(path string, limit int64) ([]byte, error) {
+	return s.read(path, limit, false)
+}
+
+func (s *Store) read(path string, limit int64, hint bool) ([]byte, error) {
 	a, err := s.snapshot()
 	if err != nil {
 		return nil, pathError("read", path, err)
@@ -242,21 +254,31 @@ func (s *Store) Read(path string, limit int64) ([]byte, error) {
 	}
 	data, _, err := readAt(a.fd, rel, limit)
 	if err != nil {
-		return nil, a.hint(path, pathError("read", path, err))
+		err = pathError("read", path, err)
+		if hint {
+			err = a.hint(path, err)
+		}
+		return nil, err
 	}
 	return data, nil
 }
 
-const maxHints = 5
+const (
+	maxHints       = 5
+	maxHintEntries = 10_000
+	hintTimeout    = 100 * time.Millisecond
+)
 
 func (a access) hint(path string, err error) error {
 	if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), hintTimeout)
+	defer cancel()
 	name := filepath.Base(path)
 	var matches []string
 	count := 0
-	walkErr := a.walk(context.Background(), func(relative string, _ fs.FileInfo) error {
+	walkErr := a.walk(ctx, maxHintEntries, func(relative string, _ fs.FileInfo) error {
 		if filepath.Base(relative) == name {
 			count++
 			candidate := filepath.Join(a.base, relative)
@@ -268,6 +290,7 @@ func (a access) hint(path string, err error) error {
 		}
 		return nil
 	})
+	// If interrupted, don't present a partial or misleading candidate list.
 	if walkErr != nil || count == 0 {
 		return err
 	}
@@ -295,10 +318,13 @@ func (s *Store) Walk(ctx context.Context, visit func(relative string, info fs.Fi
 		return err
 	}
 	defer unix.Close(a.fd)
-	return a.walk(ctx, visit)
+	return a.walk(ctx, 0, visit)
 }
 
-func (a access) walk(ctx context.Context, visit func(string, fs.FileInfo) error) error {
+var errWalkBudget = errors.New("note walk reached its entry limit")
+
+func (a access) walk(ctx context.Context, maxEntries int, visit func(string, fs.FileInfo) error) error {
+	entries := 0
 	var walkDir func(string) error
 	walkDir = func(dir string) error {
 		if err := ctx.Err(); err != nil {
@@ -320,6 +346,10 @@ func (a access) walk(ctx context.Context, visit func(string, fs.FileInfo) error)
 			for _, name := range names {
 				if err := ctx.Err(); err != nil {
 					return err
+				}
+				entries++
+				if maxEntries > 0 && entries > maxEntries {
+					return errWalkBudget
 				}
 				rel := filepath.Join(dir, name)
 				if reserved(rel, a.excluded) {

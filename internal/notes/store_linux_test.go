@@ -224,6 +224,9 @@ func TestMutationsAndHints(t *testing.T) {
 			t.Errorf("missing-path hint: %v", err)
 		}
 	}
+	if _, err := store.ReadRaw("notes/note.md", -1); !errors.Is(err, fs.ErrNotExist) || strings.Contains(err.Error(), path) {
+		t.Errorf("ReadRaw should return the original missing-path error: %v", err)
+	}
 	put(t, root, path, "%% #bobik: draft %%")
 	for _, op := range []func() error{
 		func() error { return store.Write(path, []byte("replace")) },
@@ -252,5 +255,24 @@ func TestMutationsAndHints(t *testing.T) {
 	cancel()
 	if err := store.Walk(ctx, func(string, fs.FileInfo) error { return nil }); !errors.Is(err, context.Canceled) {
 		t.Errorf("canceled walk: %v", err)
+	}
+}
+
+func TestWalkBudgetCountsIneligibleEntries(t *testing.T) {
+	root := t.TempDir()
+	put(t, root, "one.txt", "hidden by policy")
+	put(t, root, "two.txt", "hidden by policy")
+	store := openStore(t, "*.md", root)
+	a, err := store.snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(a.fd)
+	err = a.walk(t.Context(), 1, func(string, fs.FileInfo) error {
+		t.Error("unexpected visit")
+		return nil
+	})
+	if !errors.Is(err, errWalkBudget) {
+		t.Errorf("walk budget should include rejected candidates, got %v", err)
 	}
 }
