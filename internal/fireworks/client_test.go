@@ -3,11 +3,16 @@ package fireworks_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/tichopad/bobik/internal/fireworks"
 )
@@ -93,7 +98,7 @@ func TestCompleteToolConversation(t *testing.T) {
 
 func TestCompleteCallerCancellation(t *testing.T) {
 	started := make(chan struct{})
-	ctx, cancel := context.WithCancel(t.Context())
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	client := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
@@ -108,7 +113,89 @@ func TestCompleteCallerCancellation(t *testing.T) {
 		}
 	}()
 	_, err := client.Complete(ctx, fireworks.Request{})
-	if err == nil {
-		t.Fatal("Complete returned success after cancellation")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Complete cancellation = %v", err)
+	}
+}
+
+func TestCompleteSanitizesUnusableResponses(t *testing.T) {
+	const usage = `"usage":{"prompt_tokens":6,"completion_tokens":4}`
+	for _, tc := range []struct {
+		name       string
+		status     int
+		body       string
+		errorText  string
+		wantTokens int
+	}{
+		{"status", 429, `{"error":"provider-secret"}`, "HTTP 429", 0},
+		{"body", 200, `{"error":{"message":"provider-secret"},` + usage + `}`, "provider error", 10},
+		{"empty choices", 200, `{"choices":[],` + usage + `}`, "no completion message", 10},
+		{"null message", 200, `{"choices":[{"message":null}],` + usage + `}`, "no completion message", 10},
+		{"invalid JSON", 200, `provider-secret`, "invalid Fireworks response", 0},
+		{"response limit", 200, strings.Repeat("a", 4<<20+1), "4 MiB limit", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := testClient(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			})
+			resp, err := client.Complete(t.Context(), fireworks.Request{})
+			if err == nil || !strings.Contains(err.Error(), tc.errorText) ||
+				strings.Contains(err.Error(), "provider-secret") || strings.Contains(err.Error(), "test-key") ||
+				errors.Unwrap(err) != nil || resp.Usage.TotalTokens != tc.wantTokens {
+				t.Fatalf("Complete() = %#v, %v; want safe %q error and %d tokens", resp, err, tc.errorText, tc.wantTokens)
+			}
+		})
+	}
+}
+
+func TestCompleteKeepsErrorFinishWithoutLoggingProviderMessage(t *testing.T) {
+	client := testClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{
+			"choices":[{"finish_reason":"error","message":{"content":"provider-secret","reasoning_content":"provider-secret"}}],
+			"usage":{"total_tokens":7}
+		}`)
+	})
+	resp, err := client.Complete(t.Context(), fireworks.Request{})
+	want := fireworks.Response{
+		Message:      fireworks.Message{Role: "assistant"},
+		FinishReason: "error",
+		Usage:        fireworks.Usage{TotalTokens: 7},
+	}
+	if err != nil || !reflect.DeepEqual(resp, want) {
+		t.Fatalf("Complete() = %#v, %v; want %#v", resp, err, want)
+	}
+}
+
+func TestCompleteDoesNotForwardRedirect(t *testing.T) {
+	var calls atomic.Int32
+	client := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.URL.Path == "/redirect" {
+			http.Error(w, "unexpected redirected request", http.StatusBadRequest)
+			return
+		}
+		http.Redirect(w, r, "/redirect", http.StatusFound)
+	})
+	_, err := client.Complete(t.Context(), fireworks.Request{})
+	if err == nil || !strings.Contains(err.Error(), "HTTP 302") || calls.Load() != 1 {
+		t.Fatalf("Complete() error = %v, after %d requests", err, calls.Load())
+	}
+}
+
+type failingTransport struct{}
+
+func (failingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	return nil, fmt.Errorf("transport-secret: %s; %s", r.URL, r.Header.Get("Authorization"))
+}
+
+func TestCompleteSanitizesTransportError(t *testing.T) {
+	client := &fireworks.Client{
+		APIKey: "key-secret", Endpoint: "http://example.invalid/?token=url-secret",
+		HTTP: &http.Client{Transport: failingTransport{}},
+	}
+	_, err := client.Complete(t.Context(), fireworks.Request{})
+	if err == nil || err.Error() != "Fireworks request failed" || errors.Unwrap(err) != nil {
+		t.Fatalf("Complete() error = %v", err)
 	}
 }

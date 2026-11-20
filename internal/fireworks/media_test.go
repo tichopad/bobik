@@ -1,13 +1,17 @@
 package fireworks_test
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/tichopad/bobik/internal/fireworks"
 )
 
 const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
@@ -83,5 +87,101 @@ func TestViewMediaMultipartWithoutTools(t *testing.T) {
 				t.Fatalf("ViewMedia() = %q, %+v, %v after %d requests", text, usage, err, requests.Load())
 			}
 		})
+	}
+}
+
+func TestViewMediaRejectsInvalidInputBeforeHTTP(t *testing.T) {
+	png, err := base64.StdEncoding.DecodeString(pngBase64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	badCRC := append([]byte(nil), png...)
+	badCRC[29] ^= 1
+	client := testClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("invalid image reached Fireworks")
+		w.WriteHeader(http.StatusBadRequest)
+	})
+	readError := errors.New("path denied")
+	for _, tc := range []struct {
+		name, path, errorText string
+		data                  []byte
+		readErr               error
+		wantRead              bool
+	}{
+		{"URL", "HtTpS://example.invalid/image.png", "local sandbox paths", nil, nil, false},
+		{"file URL", "file:///notes/image.png", "local sandbox paths", nil, nil, false},
+		{"empty path", "", "local image path", nil, nil, false},
+		{"denied", "denied.png", "path denied", nil, readError, true},
+		{"too large", "large.png", "10 MiB", make([]byte, fireworks.MaxImageBytes+1), nil, true},
+		{"nonimage", "fake.png", "unsupported or invalid", []byte("not a PNG"), nil, true},
+		{"truncated", "truncated.png", "unsupported or invalid", png[:24], nil, true},
+		{"CRC", "badCRC.png", "unsupported or invalid", badCRC, nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			read := false
+			text, usage, err := client.ViewMedia(t.Context(), mediaSource(func(string, int64) ([]byte, error) {
+				read = true
+				return tc.data, tc.readErr
+			}), "vision", tc.path, "")
+			if read != tc.wantRead || text != "" || usage != (fireworks.Usage{}) ||
+				err == nil || !strings.Contains(err.Error(), tc.errorText) || (tc.readErr != nil && !errors.Is(err, tc.readErr)) {
+				t.Fatalf("ViewMedia() = %q, %+v, %v (read=%t)", text, usage, err, read)
+			}
+		})
+	}
+}
+
+func TestViewMediaHandlesFinishReasonsAndUsage(t *testing.T) {
+	png, err := base64.StdEncoding.DecodeString(pngBase64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, reply, want string
+		status, tokens    int
+	}{
+		{"partial", `{"choices":[{"message":{"content":"Partial"},"finish_reason":"length"}],"usage":{"total_tokens":3}}`,
+			"INCOMPLETE IMAGE INSPECTION — model output limit reached; the following is partial:\n\nPartial", 200, 3},
+		{"empty", `{"choices":[{"message":{"content":"   "},"finish_reason":"stop"}],"usage":{"total_tokens":3}}`, "", 200, 3},
+		{"refusal", `{"choices":[{"message":{"content":"provider-secret"},"finish_reason":"content_filter"}],"usage":{"total_tokens":3}}`, "", 200, 3},
+		{"error finish", `{"choices":[{"message":{"content":"provider-secret"},"finish_reason":"error"}],"usage":{"total_tokens":3}}`, "", 200, 3},
+		{"unsolicited tool call", `{"choices":[{"message":{"content":"provider-secret","tool_calls":[{"function":{"name":"noop"}}]},"finish_reason":"stop"}],"usage":{"total_tokens":3}}`, "", 200, 3},
+		{"HTTP error", `provider-secret`, "", 429, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests atomic.Int32
+			client := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				_, _ = io.Copy(io.Discard, r.Body)
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.reply)
+			})
+			text, usage, err := client.ViewMedia(t.Context(), mediaSource(func(string, int64) ([]byte, error) {
+				return png, nil
+			}), "vision", "image.png", "")
+			if text != tc.want || usage.TotalTokens != tc.tokens || requests.Load() != 1 {
+				t.Fatalf("ViewMedia() = %q, %+v, %v after %d requests", text, usage, err, requests.Load())
+			}
+			if tc.want != "" && err != nil {
+				t.Fatal(err)
+			}
+			if tc.want == "" && (err == nil || !strings.Contains(err.Error(), "--vision-model") ||
+				strings.Contains(err.Error(), "provider-secret") || errors.Unwrap(err) != nil) {
+				t.Fatalf("expected safe vision error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestViewMediaCancelledBeforeRead(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	client := &fireworks.Client{}
+	_, _, err := client.ViewMedia(ctx, mediaSource(func(string, int64) ([]byte, error) {
+		t.Fatal("cancelled call read the source")
+		return nil, nil
+	}), "vision", "image.png", "")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ViewMedia cancellation = %v", err)
 	}
 }

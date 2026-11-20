@@ -220,6 +220,12 @@ func (c *Client) Complete(ctx context.Context, req Request) (Response, error) {
 	choice := wire.Choices[0]
 	msg := choice.Message
 	resp.FinishReason = choice.FinishReason
+	// A provider can report an application error even on HTTP 200. Keep its
+	// finish reason and usage, but not its potentially sensitive message.
+	if resp.FinishReason == "error" {
+		resp.Message.Role = "assistant"
+		return resp, nil
+	}
 	resp.Message = Message{Role: msg.Role, Content: msg.Content, Reasoning: msg.Reasoning}
 	if resp.Message.Role == "" {
 		resp.Message.Role = "assistant"
