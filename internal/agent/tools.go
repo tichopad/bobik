@@ -140,6 +140,9 @@ func parseInput(call fireworks.Call) (map[string]any, error) {
 }
 
 func (s *runState) runTool(ctx context.Context, step int, call fireworks.Call) (fireworks.Message, error) {
+	if t, ok := s.mcp[call.Name]; ok {
+		return s.runMCPTool(ctx, step, call, t)
+	}
 	input, toolErr := parseInput(call)
 	fields := func() map[string]any {
 		return map[string]any{"step": step, "toolName": call.Name, "toolCallId": call.ID}

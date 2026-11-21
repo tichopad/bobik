@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"path/filepath"
 	"slices"
 	"time"
@@ -50,6 +51,7 @@ type Config struct {
 	ModelClient        ModelClient
 	VisionClient       VisionClient
 	Verbose            io.Writer
+	OpenMCP            func(context.Context) ([]MCPTool, func())
 	// OnWrite receives the absolute path after a successful typed mutation,
 	// including deletion, before writing the tool result to the audit.
 	OnWrite func(string)
@@ -139,6 +141,20 @@ func Run(parent context.Context, cfg Config) (summary Summary, runErr error) {
 		return summary, err
 	}
 	cfg.Notes.SetTrigger(cfg.Trigger)
+	if cfg.OpenMCP != nil {
+		discovered, closeMCP := cfg.OpenMCP(ctx)
+		if closeMCP != nil {
+			defer closeMCP()
+		}
+		state.mcp = make(map[string]MCPTool, len(discovered))
+		for _, tool := range discovered {
+			name := modelToolName(tool.Server, tool.Name)
+			if _, exists := state.mcp[name]; exists {
+				return summary, fmt.Errorf("duplicate MCP tool name %q", name)
+			}
+			state.mcp[name] = tool
+		}
+	}
 	if err := state.loop(ctx, &summary); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			if parent.Err() == nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -157,11 +173,16 @@ type runState struct {
 	written     map[string]struct{}
 	outerUsage  fireworks.Usage
 	visionUsage fireworks.Usage
+	mcp         map[string]MCPTool
 }
 
 func (s *runState) loop(ctx context.Context, summary *Summary) error {
 	req := fireworks.Request{
 		Model: s.cfg.Model, MaxTokens: 8192, Tools: toolDefinitions(),
+	}
+	for _, name := range slices.Sorted(maps.Keys(s.mcp)) {
+		t := s.mcp[name]
+		req.Tools = append(req.Tools, fireworks.Tool{Name: name, Description: t.Description, Parameters: t.InputSchema})
 	}
 	size := 0
 	appendMessage := func(msg fireworks.Message) error {
