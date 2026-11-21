@@ -197,5 +197,4 @@ go build ./cmd/bobik
 
 Tests use temporary note directories and local fake model responses. Run
 `bobik check-sandbox` as well: a passing unit suite on a restricted host is not
-evidence that the sandbox can start there. See
-[rewrite validation](docs/rewrite-validation.md) for release checks.
+evidence that the sandbox can start there.
