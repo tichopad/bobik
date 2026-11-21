@@ -57,6 +57,65 @@ Fireworks for inspection. It returns text and doesn't send the rest of the
 conversation. Each run has a five-minute deadline; each Bash call has 30
 seconds and reports when its output is truncated.
 
+## MCP tools
+
+Configure MCP servers in Bobik's JSON config, outside the vault. Bobik
+connects at the start of each run (including watch runs) and offers the
+discovered tools directly to the model. For example, a server named `search`
+exposing `searxng_search` appears as `mcp_search__searxng_search`. A search
+returns results to the agent without opening the linked pages.
+
+For local SearXNG, merge the `mcpServers` object from
+[`examples/mcp-config.json`](examples/mcp-config.json) into your existing
+config and replace the script path with your installation. Keep the executable
+and server scripts outside the vault. Commands are launched directly from `/`,
+without shell expansion. The server receives `PATH`, `HOME`, and temporary
+directory variables; add names to `passEnv` if it needs other variables.
+
+For remote servers, use `url` instead of `command`. Bobik uses Streamable
+HTTP and tries legacy SSE if the server rejects the initial endpoint with
+404 or 405. Here are two example entries under `mcpServers`:
+
+```json
+{
+  "catalog": {
+    "url": "https://catalog.example/mcp",
+    "headersEnv": { "Authorization": "CATALOG_AUTHORIZATION" },
+    "disabledTools": ["delete_item"]
+  },
+  "calendar": {
+    "url": "https://calendar.example/mcp",
+    "oauth": {}
+  }
+}
+```
+
+For `headersEnv`, the named variable contains the **whole header value**,
+including `Bearer ` if required. For OAuth, run `bobik mcp login calendar`
+once (add `--config <path>` if needed). Bobik opens the browser and receives
+the authorization code on a loopback callback. For a pre-registered client,
+set `oauth.clientId`, optionally `oauth.clientSecretEnv`, and `oauth.redirectUrl`
+if the provider needs a fixed loopback port. Otherwise Bobik requests dynamic
+registration. Normal runs refresh tokens when possible and never open a browser.
+Tokens are stored unencrypted in owner-only files, one per connection under
+`$XDG_STATE_HOME/bobik/mcpauth/` (normally `~/.local/state/bobik/mcpauth/`).
+
+All tools a configured server advertises, including new ones, are enabled
+unless listed in that server's `disabledTools`. Use the original tool names
+in that list. Only tools are supported; resources and prompt templates are
+not loaded. Tool responses include text and structured JSON, with notices for
+truncated or omitted content.
+
+Local MCP commands run as **your Linux user**, outside the Bash sandbox.
+Only configure commands you trust. The server can access the network and your
+files, even paths hidden from Bobik. Bash itself stays offline. For a remote
+server, tool arguments are sent to that server.
+
+If a server is unavailable, Bobik reports it on stderr and continues without
+its tools. Connections and local processes are closed after the run. Bobik
+doesn't automatically repeat a failed tool call: if the response was lost,
+the server may already have performed the action.
+
 ## Watch mode
 
 Add `--watch` to run once at startup, then rerun when a changed Markdown note
@@ -88,6 +147,7 @@ for the current run; the second cancels it.
 | --- | --- |
 | `--prompt <path>` | Required Markdown instructions, inside or outside the vault. |
 | `--vault <dir>` | Required existing vault directory. |
+| `--config <path>` | Override `$XDG_CONFIG_HOME/bobik/config.json` (normally `~/.config/bobik/config.json`). |
 | `--hide <dir>` / `--read-only <dir>` | Repeatable directory exceptions. |
 | `--model <id>` | `accounts/fireworks/models/deepseek-v4p1-flash-1017` |
 | `--vision-model <id>` | Uses `--model` unless set; no automatic fallback. |
@@ -103,13 +163,24 @@ Exit codes: `0` success, `1` runtime failure, `2` usage or configuration error,
 
 Each run writes a JSONL log under `.agent-bobik/` with tool calls, results, and
 token usage. Keep logs private: they can contain note contents and tool
-arguments. Bash logs aren't a complete record of which files changed.
+arguments. MCP call events record the server, tool, elapsed time and outcome
+without recording arguments or returned content. Assistant messages or
+subsequent note edits can still quote search results. Bash logs aren't a
+complete record of which files changed.
 
 ```sh
 go test ./...
 go test -race ./...
 go vet ./...
 go build ./cmd/bobik
+```
+
+To exercise your own SearXNG setup, run the opt-in smoke test with an
+absolute config path. It makes a real search with a local test model:
+
+```sh
+BOBIK_TEST_SEARXNG_CONFIG="$HOME/.config/bobik/config.json" \
+  go test -count=1 -run '^TestLiveSearxng$' ./cmd/bobik
 ```
 
 Run `bobik check-sandbox` on the deployment host too; passing unit tests don't

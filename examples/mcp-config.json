@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "search": {
+      "command": "node",
+      "args": ["/absolute/path/to/searxng-mcp/dist/index.js"]
+    }
+  }
+}

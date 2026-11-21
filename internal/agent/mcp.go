@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -46,9 +47,9 @@ func (s *runState) runMCPTool(ctx context.Context, step int, call fireworks.Call
 	var err error
 	switch {
 	case len(call.Arguments) > maxArguments:
-		err = fmt.Errorf("tool arguments exceed the 1 MiB limit")
+		err = errors.New("tool arguments exceed the 1 MiB limit")
 	case !strings.HasPrefix(args, "{") || !json.Valid([]byte(args)):
-		err = fmt.Errorf("tool arguments must be a JSON object")
+		err = errors.New("tool arguments must be a JSON object")
 	default:
 		content, err = tool.Call(ctx, json.RawMessage(args))
 	}
