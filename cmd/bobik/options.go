@@ -24,11 +24,13 @@ const help = `bobik — a single-purpose AI agent for Markdown notes
 
 Usage:
   bobik --prompt <path> --vault <directory> [options]
-  bobik set-api-key <key>
+  bobik set-api-key <key> [--config <path>]
+  bobik mcp login <server> [--vault <directory>] [--config <path>]
   bobik check-sandbox
   bobik --help | --version
 
 Options:
+  --config <path>          Use this JSON configuration instead of the default
   --prompt <path>          Markdown instructions inside or outside the vault (required)
   --vault <directory>      Live notes directory (required)
   --hide <directory>       Hide a vault-relative directory (repeatable)
@@ -50,6 +52,31 @@ type options struct {
 	steps                                      int
 	quietPeriod                                time.Duration
 	watch                                      bool
+}
+
+// Accept the global option before or after the command and its arguments.
+func splitConfigOption(args []string) (string, []string, error) {
+	var override string
+	rest := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		name, value, hasValue := strings.Cut(args[i], "=")
+		if name != "--config" {
+			rest = append(rest, args[i])
+			continue
+		}
+		if override != "" {
+			return "", nil, errors.New("--config may be specified only once")
+		}
+		if !hasValue && i+1 < len(args) {
+			i++
+			value = args[i]
+		}
+		if strings.TrimSpace(value) == "" || strings.HasPrefix(value, "--") {
+			return "", nil, errors.New("--config requires a path")
+		}
+		override = value
+	}
+	return override, rest, nil
 }
 
 func parseOptions(args []string) (options, error) {

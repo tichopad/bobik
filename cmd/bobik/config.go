@@ -56,8 +56,9 @@ func configPath(getenv environment) (string, error) {
 	return "", errors.New("neither HOME nor XDG_CONFIG_HOME is set")
 }
 
-type keyConfig struct {
-	APIKey string `json:"apiKey"`
+type settings struct {
+	APIKey     string                    `json:"apiKey"`
+	MCPServers map[string]serverSettings `json:"mcpServers"`
 }
 
 func checkKeyLocation(vault, path string) error {
@@ -66,7 +67,7 @@ func checkKeyLocation(vault, path string) error {
 		return fmt.Errorf("resolve saved API key location: %w", err)
 	}
 	for _, name := range []string{path, resolved} {
-		if within(vault, name) || within(filepath.Dir(name), vault) {
+		if within(vault, name) {
 			return errors.New("saved API key configuration must be outside the vault and the shell's system directories")
 		}
 	}
@@ -92,52 +93,60 @@ func resolveConfigPath(path string) (string, error) {
 	return filepath.Join(parent, filepath.Base(path)), nil
 }
 
-func requireKey(getenv environment) (string, error) {
+func (cfg settings) requireKey(getenv environment) (string, error) {
 	if key := strings.TrimSpace(getenv("FIREWORKS_API_KEY")); key != "" {
 		return key, nil
 	}
-	path, err := configPath(getenv)
-	if err != nil {
-		return "", err
+	if key := strings.TrimSpace(cfg.APIKey); key != "" {
+		return key, nil
 	}
-	b, err := readRegular(path, 64<<10)
-	if errors.Is(err, fs.ErrNotExist) {
-		return "", errors.New("no Fireworks API key found. Set FIREWORKS_API_KEY or run: bobik set-api-key <key>")
-	}
-	if err != nil {
-		return "", fmt.Errorf("read bobik config: %w", err)
-	}
-	var cfg keyConfig
-	if json.Unmarshal(b, &cfg) != nil || strings.TrimSpace(cfg.APIKey) == "" {
-		// A malformed file can contain credentials; don't echo JSON parse details.
-		return "", fmt.Errorf("invalid bobik config at %s: expected { \"apiKey\": \"<key>\" }", path)
-	}
-	return strings.TrimSpace(cfg.APIKey), nil
+	return "", errors.New("no Fireworks API key found. Set FIREWORKS_API_KEY or run: bobik set-api-key <key>")
 }
 
-func saveKey(key string, getenv environment) (string, error) {
-	path, err := configPath(getenv)
-	if err != nil {
-		return "", err
+func loadConfig[T any](path string, optional bool) (T, error) {
+	var cfg T
+	b, err := readRegular(path, 1<<20)
+	if optional && errors.Is(err, fs.ErrNotExist) {
+		return cfg, nil
 	}
+	if err != nil {
+		return cfg, fmt.Errorf("read bobik config: %w", err)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(string(b)), "{") || json.Unmarshal(b, &cfg) != nil {
+		return cfg, fmt.Errorf("invalid bobik config at %s: expected a JSON settings object", path)
+	}
+	return cfg, nil
+}
+
+func saveKey(key, path string) error {
+	cfg, err := loadConfig[map[string]json.RawMessage](path, true)
+	if err != nil {
+		return err
+	}
+	if cfg == nil {
+		cfg = make(map[string]json.RawMessage)
+	}
+	for k := range cfg {
+		if strings.EqualFold(k, "apiKey") {
+			delete(cfg, k)
+		}
+	}
+	cfg["apiKey"], _ = json.Marshal(key)
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", err
+		return err
 	}
 	f, err := os.CreateTemp(dir, ".key-*") // 0600, including on replacement
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer os.Remove(f.Name())
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
-	if err := errors.Join(enc.Encode(keyConfig{APIKey: key}), f.Close()); err != nil {
-		return "", err
+	if err := errors.Join(enc.Encode(cfg), f.Close()); err != nil {
+		return err
 	}
-	if err := os.Rename(f.Name(), path); err != nil {
-		return "", err
-	}
-	return path, nil
+	return os.Rename(f.Name(), path)
 }
 
 func readRegular(path string, limit int64) ([]byte, error) {

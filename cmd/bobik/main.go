@@ -14,6 +14,7 @@ import (
 
 	"github.com/tichopad/bobik/internal/agent"
 	"github.com/tichopad/bobik/internal/fireworks"
+	"github.com/tichopad/bobik/internal/mcpauth"
 	"github.com/tichopad/bobik/internal/notes"
 	"github.com/tichopad/bobik/internal/sandbox"
 	"github.com/tichopad/bobik/internal/watch"
@@ -45,6 +46,10 @@ func main() {
 }
 
 func (a app) run(args []string) int {
+	override, args, err := splitConfigOption(args)
+	if err != nil {
+		return a.fail(exitUsage, err)
+	}
 	if len(args) == 1 && args[0] == "--version" {
 		fmt.Fprintln(a.stdout, version)
 		return exitOK
@@ -62,7 +67,7 @@ func (a app) run(args []string) int {
 	for _, arg := range args {
 		if arg == "--help" || arg == "-h" {
 			if len(args) > 0 && args[0] == "set-api-key" {
-				fmt.Fprintln(a.stdout, "Usage: bobik set-api-key <key>")
+				fmt.Fprintln(a.stdout, "Usage: bobik set-api-key <key> [--config <path>]")
 			} else {
 				fmt.Fprint(a.stdout, help)
 			}
@@ -73,12 +78,18 @@ func (a app) run(args []string) int {
 		if len(args) != 2 || strings.TrimSpace(args[1]) == "" {
 			return a.fail(exitUsage, errors.New("usage: bobik set-api-key <key>"))
 		}
-		path, err := saveKey(strings.TrimSpace(args[1]), a.getenv)
+		path, err := a.settingsPath(override)
+		if err == nil {
+			err = saveKey(strings.TrimSpace(args[1]), path)
+		}
 		if err != nil {
 			return a.fail(exitRunError, fmt.Errorf("save API key: %w", err))
 		}
 		fmt.Fprintf(a.stdout, "API key saved to %s\n", path)
 		return exitOK
+	}
+	if len(args) >= 2 && args[0] == "mcp" && args[1] == "login" {
+		return a.login(args[2:], override)
 	}
 	if len(args) > 0 && args[0] == "run" {
 		args = args[1:]
@@ -98,25 +109,41 @@ func (a app) run(args []string) int {
 		return a.fail(exitUsage, err)
 	}
 	defer store.Close()
+	path, err := a.settingsPath(override)
+	if err != nil && (override != "" || strings.TrimSpace(a.getenv("FIREWORKS_API_KEY")) == "") {
+		return a.fail(exitUsage, err)
+	}
+	checkPrivate := func() error { return a.checkPrivateSettings(store.Base(), path, override != "") }
+	if err := checkPrivate(); err != nil {
+		return a.fail(exitUsage, err)
+	}
 	loadPrompt := func() (string, error) { return readPrompt(store, promptPath) }
 	prompt, err := loadPrompt()
 	if err != nil {
 		return a.fail(exitUsage, err)
 	}
-	if path, err := configPath(a.getenv); err == nil {
-		if err := checkKeyLocation(vault, fromDirectory(cwd, path)); err != nil {
+	var fileCfg settings
+	if path != "" {
+		fileCfg, err = loadConfig[settings](path, override == "")
+		if err != nil {
 			return a.fail(exitUsage, err)
 		}
 	}
-	key, err := requireKey(a.getenv)
+	key, err := fileCfg.requireKey(a.getenv)
 	if err != nil {
 		return a.fail(exitUsage, err)
 	}
 	client := a.client(key)
+	if o.watch {
+		a.stderr = &serialWriter{w: a.stderr}
+	}
 	cfg := agent.Config{
 		PromptPath: promptPath, Trigger: o.trigger,
 		Notes: store, Model: o.model, VisionModel: o.visionModel,
 		MaxSteps: o.steps, ModelClient: client, VisionClient: client,
+	}
+	if len(fileCfg.MCPServers) > 0 {
+		cfg.OpenMCP = openMCP(fileCfg.MCPServers, store.Base(), a.stderr, a.getenv)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -130,7 +157,6 @@ func (a app) run(args []string) int {
 		}
 		return exitOK
 	}
-	a.stderr = &serialWriter{w: a.stderr}
 	stop := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
@@ -139,6 +165,9 @@ func (a app) run(args []string) int {
 			Trigger: o.trigger, QuietPeriod: o.quietPeriod, Notes: store,
 			Stdout: a.stdout, Stderr: a.stderr, Stop: stop,
 			Run: func(ctx context.Context, prompt string) ([]string, error) {
+				if err := checkPrivate(); err != nil {
+					return nil, err
+				}
 				runCfg := cfg
 				runCfg.Prompt = prompt
 				initial, files := watch.Changes(ctx)
@@ -167,6 +196,44 @@ func (a app) run(args []string) int {
 		<-done
 		return exitInterrupted
 	}
+}
+
+func (a app) checkPrivateSettings(vault, selected string, override bool) error {
+	if err := mcpauth.CheckVault(vault); err != nil {
+		return err
+	}
+	if override {
+		if path, err := a.settingsPath(""); err == nil && path != selected {
+			if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+				if err := checkKeyLocation(vault, path); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if selected != "" {
+		return checkKeyLocation(vault, selected)
+	}
+	return nil
+}
+
+func (a app) settingsPath(override string) (string, error) {
+	path := override
+	if path == "" {
+		var err error
+		path, err = configPath(a.getenv)
+		if err != nil {
+			return "", err
+		}
+	}
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path), nil
+	}
+	cwd, err := a.cwd()
+	if err != nil {
+		return "", err
+	}
+	return fromDirectory(cwd, path), nil
 }
 
 func cancelOnSignal(ctx context.Context, cancel context.CancelFunc, signals <-chan os.Signal) {

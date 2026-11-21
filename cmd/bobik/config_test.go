@@ -16,28 +16,35 @@ func TestConfigPrecedenceAndPrivateReplacement(t *testing.T) {
 	dir := t.TempDir()
 	env := map[string]string{"HOME": filepath.Join(dir, "home"), "XDG_CONFIG_HOME": filepath.Join(dir, "xdg")}
 	get := func(k string) string { return env[k] }
-	path, err := saveKey("first", get)
+	path, err := configPath(get)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if want := filepath.Join(dir, "xdg", "bobik", "config.json"); path != want {
 		t.Fatalf("path %s, want %s", path, want)
 	}
+	if err := saveKey("first", path); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Chmod(path, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := saveKey("second", get); err != nil {
+	if err := saveKey("second", path); err != nil {
 		t.Fatal(err)
 	}
 	st, err := os.Stat(path)
 	if err != nil || st.Mode().Perm() != 0o600 {
 		t.Fatalf("insecure config file: %v, %v", st, err)
 	}
-	if got, err := requireKey(get); got != "second" || err != nil {
+	cfg, err := loadConfig[settings](path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := cfg.requireKey(get); got != "second" || err != nil {
 		t.Fatalf("unexpected file key: %q, %v", got, err)
 	}
 	env["FIREWORKS_API_KEY"] = "  env-key  "
-	if got, err := requireKey(get); got != "env-key" || err != nil {
+	if got, err := cfg.requireKey(get); got != "env-key" || err != nil {
 		t.Fatalf("unexpected environment key: %q, %v", got, err)
 	}
 	delete(env, "XDG_CONFIG_HOME")
@@ -60,14 +67,17 @@ func TestMalformedConfigDoesNotEchoSecret(t *testing.T) {
 		}
 		return ""
 	}
-	path, err := saveKey("irrelevant", env)
+	path, err := configPath(env)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveKey("irrelevant", path); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, []byte(`{"apiKey":"secret"`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := requireKey(env); err == nil || strings.Contains(err.Error(), "secret") {
+	if _, err := loadConfig[settings](path, false); err == nil || strings.Contains(err.Error(), "secret") {
 		t.Fatalf("expected sanitized error, got %v", err)
 	}
 }

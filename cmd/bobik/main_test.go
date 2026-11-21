@@ -144,12 +144,51 @@ func TestCLIConfigIsNotAReadableNote(t *testing.T) {
 		}
 		return ""
 	}
-	if _, err := saveKey("cfg-secret", a.getenv); err != nil {
+	path, err := configPath(a.getenv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveKey("cfg-secret", path); err != nil {
 		t.Fatal(err)
 	}
 	if code := a.run([]string{"--prompt=prompt", "--vault=vault"}); code != exitUsage ||
 		!strings.Contains(stderr.String(), "saved API key configuration must be outside") || strings.Contains(stderr.String(), "cfg-secret") {
 		t.Fatalf("exit %d, stderr %s", code, stderr)
+	}
+}
+
+func TestCLISetKeyPreservesCustomConfig(t *testing.T) {
+	a, cwd, _, stderr := cliFixture(t, nil)
+	path := filepath.Join(cwd, "custom.json")
+	before := `{"apiKey":"old","mcpServers":{"example":{"url":"https://example.com/mcp"}},"extra":{"value":42}}`
+	if err := os.WriteFile(path, []byte(before), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if code := a.run([]string{"set-api-key", "new", "--config", "custom.json"}); code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	cfg, err := loadConfig[map[string]json.RawMessage](path, false)
+	if err != nil || string(cfg["apiKey"]) != `"new"` || !bytes.Contains(cfg["extra"], []byte("42")) || !bytes.Contains(cfg["mcpServers"], []byte("example.com")) {
+		t.Fatal("custom settings lost", err)
+	}
+	if err := os.WriteFile(path, []byte(`{"apiKey":"sensitive"`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := a.run([]string{"--config=custom.json", "set-api-key", "another"}); code == 0 || strings.Contains(stderr.String(), "sensitive") {
+		t.Fatalf("overwrote malformed settings or leaked a secret: exit %d", code)
+	}
+}
+
+func TestCLICustomConfigCheckedWithEnvironmentKey(t *testing.T) {
+	a, _, _, stderr := cliFixture(t, nil)
+	for _, tc := range []struct{ path, want string }{
+		{"vault/mcp.json", "outside the vault"},
+		{"missing.json", "read bobik config"},
+	} {
+		stderr.Reset()
+		if code := a.run([]string{"--config", tc.path, "--prompt=prompt", "--vault=vault"}); code != exitUsage || !strings.Contains(stderr.String(), tc.want) {
+			t.Fatalf("%s: exit %d, %s", tc.path, code, stderr)
+		}
 	}
 }
 
