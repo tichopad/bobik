@@ -173,12 +173,14 @@ func TestBubblewrap(t *testing.T) {
 		if err := os.Symlink(host, filepath.Join(vault, "project/hidden/link.md")); err != nil {
 			t.Fatal(err)
 		}
-		rules := []Mount{{".agent-bobik", Hide}, {"project/hidden", Hide}, {"project/pinned", Pin}, {"project/readonly", ReadOnly}}
+		rules := []Mount{{".agent-bobik", ReadOnly}, {"project/hidden", Hide}, {"project/pinned", Pin}, {"project/readonly", ReadOnly}}
 		command := fmt.Sprintf(`
 			set -eo pipefail
 			[[ $PWD == /notes && ! -v BOBIK_SANDBOX_TEST_SECRET ]]
 			[[ ! -e %[1]q && ! -e /etc/passwd && ! -e /proc/self ]]
-			[[ ! -e project/hidden/link.md && ! -e project/hidden/key && ! -e .agent-bobik/state ]]
+			[[ ! -e project/hidden/link.md && ! -e project/hidden/key ]]
+			[[ $(cat .agent-bobik/state) == "needle in note" ]]
+			if (rm .agent-bobik/state || mv .agent-bobik moved-audit) 2>/dev/null; then exit 96; fi
 			if mv /notes /moved 2>/dev/null; then exit 95; fi
 			if (printf nope >>project/readonly/keep) 2>/dev/null; then exit 90; fi
 			if (mv project moved) 2>/dev/null; then exit 91; fi

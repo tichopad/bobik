@@ -271,7 +271,7 @@ func TestHistoryLimitStopsBeforeProviderCall(t *testing.T) {
 	}
 }
 
-func TestAuditPathIsUnavailableToTools(t *testing.T) {
+func TestAuditPathIsReadOnlyToTools(t *testing.T) {
 	cfg := config(t)
 	cfg.ModelClient = completeFunc(func(_ context.Context, req fireworks.Request) (fireworks.Response, error) {
 		if len(req.Messages) == 2 {
@@ -280,16 +280,17 @@ func TestAuditPathIsUnavailableToTools(t *testing.T) {
 				{ID: "audit-delete", Name: "deleteFile", Arguments: `{"path":"/.agent-bobik/2026-10-19T17-55-00.123.jsonl"}`},
 			}}}, nil
 		}
-		for _, result := range req.Messages[3:] {
-			if !strings.Contains(result.Content, "not allowed") {
-				t.Errorf("audit path unexpectedly available: %s", result.Content)
-			}
+		if result := req.Messages[3].Content; !strings.Contains(result, "audit-read") {
+			t.Errorf("audit read did not return the logged tool call: %s", result)
+		}
+		if result := req.Messages[4].Content; !strings.Contains(result, "not allowed") {
+			t.Errorf("audit delete was not denied: %s", result)
 		}
 		return fireworks.Response{FinishReason: "stop"}, nil
 	})
 	summary, err := Run(t.Context(), cfg)
 	if err != nil || summary.FilesWritten != 0 {
-		t.Fatalf("audit exclusion: %+v, %v", summary, err)
+		t.Fatalf("read-only audit: %+v, %v", summary, err)
 	}
 }
 
@@ -312,7 +313,7 @@ func TestBashUsesLiveVaultAndRecordedRules(t *testing.T) {
 	cfg.ModelClient = completeFunc(func(_ context.Context, req fireworks.Request) (fireworks.Response, error) {
 		if len(req.Messages) == 2 {
 			return fireworks.Response{FinishReason: "tool_calls", Message: fireworks.Message{ToolCalls: []fireworks.Call{
-				{ID: "shell", Name: "bash", Arguments: `{"command":"if printf x >private/x || printf x >archive/x || printf x >.agent-bobik/x; then exit 42; fi; printf live >live.md"}`},
+				{ID: "shell", Name: "bash", Arguments: `{"command":"set -- .agent-bobik/*.jsonl; IFS= read -r line < \"$1\" || exit 41; if printf x >private/x || printf x >archive/x || printf x >> \"$1\"; then exit 42; fi; printf live >live.md"}`},
 			}}}, nil
 		}
 		result := req.Messages[len(req.Messages)-1].Content

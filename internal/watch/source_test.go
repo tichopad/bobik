@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/tichopad/bobik/internal/notes"
 	"golang.org/x/sys/unix"
 )
@@ -80,6 +81,22 @@ func TestSourceSkipsSymlinkHiddenAuditAndHardlinkEntries(t *testing.T) {
 	want := filepath.Join(root, "normal", "fake.md")
 	if len(src.known) != 1 || src.known[want] == nil || len(src.WatchList()) != 2 {
 		t.Fatalf("unexpected metadata or watches: %v, %v", src.known, src.WatchList())
+	}
+
+	auditDir := filepath.Join(root, ".agent-bobik")
+	auditNote := filepath.Join(auditDir, "fake.md")
+	write(t, auditNote, "#bobik updated")
+	queue := func(path string) { t.Errorf("unexpected queued path: %s", path) }
+	for _, event := range []fsnotify.Event{
+		{Name: auditDir, Op: fsnotify.Create},
+		{Name: auditNote, Op: fsnotify.Write},
+	} {
+		if err := src.event(event, queue); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := src.reconcile(t.Context(), queue); err != nil {
+		t.Fatal(err)
 	}
 }
 

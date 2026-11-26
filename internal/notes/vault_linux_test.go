@@ -44,7 +44,7 @@ func TestVaultDirectoryPolicy(t *testing.T) {
 		t.Fatalf("Base = %q, want %q", s.Base(), root)
 	}
 	wantRules := []Rule{
-		{".agent-bobik", Hide}, {"home", Pin}, {"home/pinned", Pin},
+		{".agent-bobik", ReadOnly}, {"home", Pin}, {"home/pinned", Pin},
 		{"home/reference", ReadOnly}, {"home/reference/private", Hide}, {"home/secret", Hide},
 	}
 	if got := s.Rules(); !slices.Equal(got, wantRules) {
@@ -73,7 +73,7 @@ func TestVaultDirectoryPolicy(t *testing.T) {
 			t.Errorf("WatchPath(%q) = %v, %v; want false, false", path, match, descend)
 		}
 	}
-	for _, path := range []string{"home/secret/not-a-note", "home/reference/private/key", ".agent-bobik/log", ".bobik-write-tmp"} {
+	for _, path := range []string{"home/secret/not-a-note", "home/reference/private/key", ".bobik-write-tmp"} {
 		if _, err := s.Read(path, -1); !errors.Is(err, ErrNotAllowed) {
 			t.Errorf("Read(%q) = %v, want ErrNotAllowed", path, err)
 		}
@@ -157,7 +157,7 @@ func TestVaultRejectsMountCrossingRule(t *testing.T) {
 func TestVaultImplicitAuditRule(t *testing.T) {
 	root := t.TempDir()
 	s := newVault(t, root)
-	if got := s.Rules(); !slices.Equal(got, []Rule{{".agent-bobik", Hide}}) {
+	if got := s.Rules(); !slices.Equal(got, []Rule{{".agent-bobik", ReadOnly}}) {
 		t.Errorf("Rules = %v", got)
 	}
 	for _, path := range []string{".agent-bobik", ".agent-bobik/log.jsonl"} {
@@ -182,8 +182,12 @@ func TestVaultImplicitAuditRule(t *testing.T) {
 		t.Errorf("creation alongside absent audit directory = %v, want ErrNotAllowed", err)
 	}
 	put(t, root, ".agent-bobik/log.jsonl", "log")
-	if _, err := s.Read(".agent-bobik/log.jsonl", -1); !errors.Is(err, ErrNotAllowed) {
-		t.Errorf("Read newly created audit log = %v, want ErrNotAllowed", err)
+	if data, err := s.Read(".agent-bobik/log.jsonl", -1); err != nil || string(data) != "log" {
+		t.Errorf("Read newly created audit log = %q, %v", data, err)
+	}
+	hidden := newVault(t, root, Rule{".agent-bobik", Hide})
+	if _, err := hidden.Read(".agent-bobik/log.jsonl", -1); !errors.Is(err, ErrNotAllowed) {
+		t.Errorf("Read explicitly hidden audit log = %v, want ErrNotAllowed", err)
 	}
 	unsafe := t.TempDir()
 	if err := os.Symlink(filepath.Join(root, ".agent-bobik"), filepath.Join(unsafe, ".agent-bobik")); err != nil {
@@ -217,30 +221,32 @@ func TestPolicyChecksResolvedAliases(t *testing.T) {
 		return resolvedFile{fd: -1}, fs.ErrNotExist
 	}
 	for _, test := range []struct {
-		path   string
-		mutate bool
-		deny   bool
+		path string
+		kind accessKind
+		deny bool
 	}{
-		{".AGENT-BOBIK/log.jsonl", false, true},
-		{"PROJECT/SECRET~1/note.md", false, true},
-		{"PROJECT/SECRET~1/new.md", true, true},
-		{"PROJECT/REFERENCE/note.md", false, false},
-		{"PROJECT/REFERENCE/note.md", true, true},
-		{"PROJECT/REFERENCE/new.md", true, true},
-		{"PROJECT", true, true},
-		{"PROJECT/other/new.md", true, false},
-		{"new.md", true, false},
+		{".AGENT-BOBIK/log.jsonl", readAccess, false},
+		{".AGENT-BOBIK/log.jsonl", writeAccess, true},
+		{".AGENT-BOBIK/log.jsonl", watchAccess, true},
+		{"PROJECT/SECRET~1/note.md", readAccess, true},
+		{"PROJECT/SECRET~1/new.md", writeAccess, true},
+		{"PROJECT/REFERENCE/note.md", readAccess, false},
+		{"PROJECT/REFERENCE/note.md", writeAccess, true},
+		{"PROJECT/REFERENCE/new.md", writeAccess, true},
+		{"PROJECT", writeAccess, true},
+		{"PROJECT/other/new.md", writeAccess, false},
+		{"new.md", writeAccess, false},
 	} {
-		err := p.checkAliases(test.path, test.mutate, lookup)
+		err := p.checkAliases(test.path, test.kind, lookup)
 		if test.deny && !errors.Is(err, ErrNotAllowed) || !test.deny && err != nil {
-			t.Errorf("checkAliases(%q, %t) = %v, deny = %t", test.path, test.mutate, err, test.deny)
+			t.Errorf("checkAliases(%q, %v) = %v, deny = %t", test.path, test.kind, err, test.deny)
 		}
 	}
 }
 
 func TestVaultChecksCaseAliasesOnCaseInsensitiveFilesystem(t *testing.T) {
 	root := t.TempDir()
-	put(t, root, ".agent-bobik/log.md", "private")
+	put(t, root, ".agent-bobik/log.md", "audit")
 	put(t, root, "Project/Secret/note.md", "hidden")
 	put(t, root, "Project/Reference/note.md", "read-only")
 	if _, err := os.Stat(filepath.Join(root, "PROJECT/secret/note.md")); errors.Is(err, fs.ErrNotExist) {
@@ -249,10 +255,13 @@ func TestVaultChecksCaseAliasesOnCaseInsensitiveFilesystem(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := newVault(t, root, Rule{"Project/Secret", Hide}, Rule{"Project/Reference", ReadOnly})
+	if data, err := s.Read(".AGENT-BOBIK/log.md", -1); err != nil || string(data) != "audit" {
+		t.Errorf("Read through audit alias = %q, %v", data, err)
+	}
+	if _, err := s.Read("PROJECT/secret/note.md", -1); !errors.Is(err, ErrNotAllowed) {
+		t.Errorf("Read through hidden alias = %v, want ErrNotAllowed", err)
+	}
 	for _, path := range []string{".AGENT-BOBIK/log.md", "PROJECT/secret/note.md"} {
-		if _, err := s.Read(path, -1); !errors.Is(err, ErrNotAllowed) {
-			t.Errorf("Read(%q) = %v, want ErrNotAllowed", path, err)
-		}
 		if match, descend := s.WatchPath(path); match || descend {
 			t.Errorf("WatchPath(%q) = %v, %v", path, match, descend)
 		}

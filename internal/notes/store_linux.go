@@ -122,10 +122,10 @@ func (s *Store) WatchPath(path string) (matches, descends bool) {
 		return false, false
 	}
 	rel, err := relativePath(s.policy.root, path)
-	if err != nil || s.policy.hidden(rel) {
+	if err != nil || inAuditDirectory(rel) || s.policy.hidden(rel) {
 		return false, false
 	}
-	if rel != "." && (access{s.policy, int(s.root.Fd())}).checkAliases(rel, false) != nil {
+	if rel != "." && (access{s.policy, int(s.root.Fd())}).checkAliases(rel, watchAccess) != nil {
 		return false, false
 	}
 	return strings.EqualFold(filepath.Ext(rel), ".md"), true
@@ -171,13 +171,21 @@ func (a access) resolve(path string) (resolvedFile, error) {
 	return resolvedFile{identity(st), fd}, nil
 }
 
-func (a access) checkAliases(path string, mutate bool) error {
-	return a.policy.checkAliases(path, mutate, a.resolve)
+type accessKind uint8
+
+const (
+	readAccess accessKind = iota
+	writeAccess
+	watchAccess
+)
+
+func (a access) checkAliases(path string, kind accessKind) error {
+	return a.policy.checkAliases(path, kind, a.resolve)
 }
 
 // Only walk branches with rules. Each such branch has a rule at its root
 // because ancestors of configured paths are automatically pinned.
-func (p policy) checkAliases(path string, mutate bool, lookup func(string) (resolvedFile, error)) error {
+func (p policy) checkAliases(path string, kind accessKind, lookup func(string) (resolvedFile, error)) error {
 	current, prefix := ".", ""
 	for part := range strings.SplitSeq(path, "/") {
 		children := p.children[current]
@@ -185,7 +193,7 @@ func (p policy) checkAliases(path string, mutate bool, lookup func(string) (reso
 			return nil
 		}
 		prefix = filepath.Join(prefix, part)
-		next, err := p.matchAlias(prefix, children, mutate, prefix == path, lookup)
+		next, err := p.matchAlias(prefix, children, kind, prefix == path, lookup)
 		if err != nil {
 			return err
 		}
@@ -197,11 +205,11 @@ func (p policy) checkAliases(path string, mutate bool, lookup func(string) (reso
 	return nil
 }
 
-func (p policy) matchAlias(prefix string, children []string, mutate, terminal bool, lookup func(string) (resolvedFile, error)) (string, error) {
+func (p policy) matchAlias(prefix string, children []string, kind accessKind, terminal bool, lookup func(string) (resolvedFile, error)) (string, error) {
 	entry, pathErr := lookup(prefix)
 	defer entry.close()
 	missing := errors.Is(pathErr, fs.ErrNotExist)
-	if missing && !mutate {
+	if missing && kind != writeAccess {
 		return "", nil
 	}
 	if pathErr != nil && !missing {
@@ -229,7 +237,8 @@ func (p policy) matchAlias(prefix string, children []string, mutate, terminal bo
 			continue
 		}
 		mode := p.dirs[rule]
-		if next != "" || mode == Hide || mutate && (mode == ReadOnly || mode == Pin && terminal) {
+		if next != "" || mode == Hide || kind == watchAccess && rule == audit.Directory ||
+			kind == writeAccess && (mode == ReadOnly || mode == Pin && terminal) {
 			return "", ErrNotAllowed
 		}
 		next = rule
@@ -339,7 +348,7 @@ func (s *Store) Read(path string, limit int64) ([]byte, error) {
 	if err != nil {
 		return nil, pathError("read", path, err)
 	}
-	if err := a.checkAliases(rel, false); err != nil {
+	if err := a.checkAliases(rel, readAccess); err != nil {
 		return nil, pathError("read", path, err)
 	}
 	data, _, err := readAt(a.fd, rel, limit)
@@ -439,7 +448,7 @@ func (s *Store) mutate(op, path string, create bool, update func([]byte) ([]byte
 	if !a.writable(rel) {
 		return wrap(ErrNotAllowed)
 	}
-	if err := a.checkAliases(rel, true); err != nil {
+	if err := a.checkAliases(rel, writeAccess); err != nil {
 		return wrap(err)
 	}
 	dir, name := filepath.Split(rel)
@@ -468,7 +477,7 @@ func (s *Store) mutate(op, path string, create bool, update func([]byte) ([]byte
 	// and that the analyzed note has not been modified or replaced. These
 	// checks narrow, but cannot close, races with non-cooperating writers.
 	recheck := func() error {
-		if err := a.checkAliases(rel, true); err != nil {
+		if err := a.checkAliases(rel, writeAccess); err != nil {
 			return err
 		}
 		parentNow, err := a.parent(filepath.Clean(dir), false)

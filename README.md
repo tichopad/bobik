@@ -42,7 +42,7 @@ built-in file tools don't need Bubblewrap.
 - **Use directory exceptions.** Repeat `--hide` to conceal contents or
   `--read-only` to allow reads but prevent edits. Both take existing
   vault-relative directories, not globs, and apply to Bash and file tools.
-  Dotfiles are visible unless hidden; `.agent-bobik` is always hidden.
+  Dotfiles are visible unless hidden; `.agent-bobik` is read-only by default.
 - **Keep secrets out of the vault.** Bash has no network access and doesn't
   mount your home directory. Keep keys outside the vault and the sandbox's
   system paths. A prompt in a hidden directory still loads and its text is
@@ -162,10 +162,12 @@ Exit codes: `0` success, `1` runtime failure, `2` usage or configuration error,
 ## Audit and development
 
 Each run writes a JSONL log under `.agent-bobik/` with tool calls, results, and
-token usage. Keep logs private: they can contain note contents and tool
-arguments. MCP call events record the server, tool, elapsed time and outcome
-without recording arguments or returned content. Assistant messages or
-subsequent note edits can still quote search results. Bash logs aren't a
+token usage. You can ask Bobik to review past runs: it can read the logs but
+cannot modify or remove them. Changes under `.agent-bobik/` never trigger a run.
+Logs can contain note contents and tool arguments. Use `--hide .agent-bobik`
+to keep them out of the agent's view. MCP call events record the server, tool,
+elapsed time and outcome without recording arguments or returned content.
+Assistant messages or subsequent note edits can still quote search results. Bash logs aren't a
 complete record of which files changed.
 
 ```sh

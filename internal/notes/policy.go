@@ -61,7 +61,7 @@ func compileVault(root string, rules []Rule) (policy, error) {
 		default:
 			return policy{}, fmt.Errorf("%w: invalid mode %q for vault rule %q", ErrNotAllowed, rule.Mode, path)
 		}
-		if path == audit.Directory && rule.Mode != Hide {
+		if inAuditDirectory(path) && (path != audit.Directory || rule.Mode == Pin) {
 			return policy{}, fmt.Errorf("%w: %q is reserved for audit logs", ErrNotAllowed, path)
 		}
 		prior, exists := p.dirs[path]
@@ -73,7 +73,9 @@ func compileVault(root string, rules []Rule) (policy, error) {
 			p.dirs[path] = rule.Mode
 		}
 	}
-	p.dirs[audit.Directory] = Hide
+	if p.dirs[audit.Directory] == "" {
+		p.dirs[audit.Directory] = ReadOnly
+	}
 	for _, path := range dirs {
 		for parent := filepath.Dir(path); parent != "."; parent = filepath.Dir(parent) {
 			switch p.dirs[parent] {
@@ -90,6 +92,10 @@ func compileVault(root string, rules []Rule) (policy, error) {
 		p.children[parent] = append(p.children[parent], rule.Path)
 	}
 	return p, nil
+}
+
+func inAuditDirectory(path string) bool {
+	return path == audit.Directory || strings.HasPrefix(path, audit.Directory+"/")
 }
 
 func rulePath(path string) (string, error) {
