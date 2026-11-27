@@ -37,6 +37,53 @@ func (w reportWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+func TestServiceReportsRunFinishingDuringShutdown(t *testing.T) {
+	type event struct {
+		name   string
+		fields map[string]string
+	}
+	events := make(chan event, 8)
+	finish := make(chan struct{})
+	h := startTestWatch(t, func(cfg *Config) {
+		cfg.ServiceLog = func(name, _ string, fields map[string]string) {
+			events <- event{name, fields}
+		}
+	}, func(ctx context.Context, _ testRun) ([]string, error) {
+		select {
+		case <-finish:
+			RecordLogPath(ctx, "/vault/.agent-bobik/audit.jsonl")
+			return nil, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	})
+	next := func(name string) map[string]string {
+		t.Helper()
+		select {
+		case got := <-events:
+			if got.name != name {
+				t.Fatalf("event = %q, want %q", got.name, name)
+			}
+			return got.fields
+		case <-time.After(3 * time.Second):
+			t.Fatalf("timed out waiting for %s", name)
+			return nil
+		}
+	}
+	next("watcher_started")
+	h.nextRun(t)
+	close(h.graceful)
+	next("watcher_stopping")
+	close(finish)
+	fields := next("run_finished")
+	if fields["OUTCOME"] != "success" || fields["TRIGGER"] != "startup" ||
+		fields["AUDIT_PATH"] != "/vault/.agent-bobik/audit.jsonl" || fields["DURATION_MS"] == "" {
+		t.Fatalf("run fields: %v", fields)
+	}
+	next("watcher_stopped")
+	h.waitStop(t)
+}
+
 func startTestWatch(t *testing.T, configure func(*Config), callback func(context.Context, testRun) ([]string, error)) *harness {
 	t.Helper()
 	h := &harness{

@@ -26,6 +26,7 @@ Usage:
   bobik --prompt <path> --vault <directory> [options]
   bobik set-api-key <key> [--config <path>]
   bobik mcp login <server> [--vault <directory>] [--config <path>]
+  bobik service install --vault <directory> --prompt <path> [--now] [--replace] [--no-linger]
   bobik check-sandbox
   bobik --help | --version
 

@@ -141,6 +141,45 @@ trigger another run. Remove the tag when handling a submission to avoid
 repeats. Failed runs retry once after 60 seconds. The first interrupt waits
 for the current run; the second cancels it.
 
+### Run at login with systemd
+
+Install Bobik at a stable path (rather than using `go run`). Save the API key
+with `bobik set-api-key`; a key exported by your shell may not be available to
+systemd. Stop any shell-run watcher for the same vault before starting the service.
+
+```sh
+bobik service install --vault "$HOME/Notes" --prompt "$HOME/Notes/bobik.md"
+systemctl --user status bobik.service
+journalctl --user -u bobik.service -f
+```
+
+There is one `bobik.service` per Linux user. With lingering off, it starts
+at login and stops after your last session ends. With lingering on, it can
+start at boot and stay running after logout. Locking the screen doesn't stop
+it. When systemd stops the service, it gives an active run up to 60 seconds
+to finish.
+
+The installer follows your account's existing lingering setting. Pass
+`--no-linger` to refuse installation on an account with lingering enabled.
+This is an install-time check; it does not change your account settings.
+
+Use `--now` to start immediately. Reinstalling the same settings is a no-op;
+use `--replace` to change them. A replacement applies the next time the service
+starts, or immediately if you also pass `--now`. The installer accepts the usual
+watch options, including `--config` to select a different settings file.
+Use `systemctl --user stop bobik.service` to stop it for now, or
+`systemctl --user disable --now bobik.service` to also disable login startup.
+
+systemd restarts a failed watcher with a five-second delay and caps repeated
+starts at five per minute. Every watcher start triggers a Bobik run.
+Agent replies and detailed run audits stay in `.agent-bobik/`. The service
+journal records lifecycle and run events, with fields for outcome, trigger,
+duration, and audit path when available. To see failed runs:
+
+```sh
+journalctl --user -u bobik.service BOBIK_EVENT=run_finished BOBIK_OUTCOME=failed
+```
+
 ## Options
 
 | Flag | Default or behavior |

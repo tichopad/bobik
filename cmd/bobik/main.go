@@ -25,6 +25,7 @@ const (
 	exitRunError    = 1
 	exitUsage       = 2
 	exitInterrupted = 130
+	serviceModeEnv  = "BOBIK_SYSTEMD_SERVICE"
 )
 
 type app struct {
@@ -63,6 +64,9 @@ func (a app) run(args []string) int {
 		}
 		fmt.Fprintln(a.stdout, "Bash sandbox is available.")
 		return exitOK
+	}
+	if len(args) > 0 && args[0] == "service" {
+		return a.service(args[1:], override)
 	}
 	for _, arg := range args {
 		if arg == "--help" || arg == "-h" {
@@ -159,11 +163,15 @@ func (a app) run(args []string) int {
 	}
 	stop := make(chan struct{})
 	done := make(chan error, 1)
+	var serviceLog watch.ServiceLog
+	if a.getenv(serviceModeEnv) == "1" {
+		serviceLog = journalLogger(a.stderr)
+	}
 	go func() {
 		done <- watch.Run(ctx, watch.Config{
 			PromptFile: promptPath, ReadPrompt: loadPrompt,
 			Trigger: o.trigger, QuietPeriod: o.quietPeriod, Notes: store,
-			Stdout: a.stdout, Stderr: a.stderr, Stop: stop,
+			Stdout: a.stdout, Stderr: a.stderr, Stop: stop, ServiceLog: serviceLog,
 			Run: func(ctx context.Context, prompt string) ([]string, error) {
 				if err := checkPrivate(); err != nil {
 					return nil, err
@@ -247,6 +255,9 @@ func cancelOnSignal(ctx context.Context, cancel context.CancelFunc, signals <-ch
 func (a app) runAgent(ctx context.Context, cfg agent.Config, watching bool) ([]string, error) {
 	summary, err := agent.Run(ctx, cfg)
 	watch.RecordLogPath(ctx, summary.LogPath)
+	if watching && a.getenv(serviceModeEnv) == "1" {
+		return summary.WrittenPaths, err
+	}
 	if err != nil {
 		if !watching {
 			a.fail(exitRunError, err)

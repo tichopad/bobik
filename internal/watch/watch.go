@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +30,8 @@ type Config struct {
 	Stderr      io.Writer
 	// Stdout is available to the caller's Run implementation; watch emits only diagnostics.
 	Stdout io.Writer
+	// ServiceLog receives operational events when running as a service.
+	ServiceLog ServiceLog
 	// Close Stop to finish any current run but discard queued work.
 	// Cancel the context to abort the current run, which must honor cancellation.
 	Stop <-chan struct{}
@@ -38,6 +41,8 @@ type Config struct {
 	// Use RecordWrite to suppress notifications before the callback returns.
 	Run func(context.Context, string) ([]string, error)
 }
+
+type ServiceLog func(event, message string, fields map[string]string)
 
 type ChangedFile struct {
 	Path    string
@@ -110,12 +115,13 @@ func Run(ctx context.Context, cfg Config) error {
 }
 
 type result struct {
-	err   error
-	batch batch
-	info  *runInfo
+	err      error
+	batch    batch
+	info     *runInfo
+	duration time.Duration
 }
 
-func run(ctx context.Context, cfg Config, timings timings) error {
+func run(ctx context.Context, cfg Config, timings timings) (runErr error) {
 	if cfg.Notes == nil || cfg.Run == nil {
 		return errors.New("watch requires a note store and a run callback")
 	}
@@ -133,6 +139,21 @@ func run(ctx context.Context, cfg Config, timings timings) error {
 	report := func(format string, args ...any) {
 		fmt.Fprintf(cfg.Stderr, "bobik: "+format+"\n", args...)
 	}
+	shuttingDown := func() {
+		const message = "shutting down; waiting for the current run to finish"
+		if cfg.ServiceLog != nil {
+			cfg.ServiceLog("watcher_stopping", message, nil)
+		} else {
+			report(message)
+		}
+	}
+	watcherError := func(message string, err error) {
+		if cfg.ServiceLog != nil {
+			cfg.ServiceLog("watcher_error", fmt.Sprintf("%s: %v", message, err), nil)
+		} else {
+			report("%s: %v", message, err)
+		}
+	}
 
 	src, err := newSource(ctx, cfg.Notes)
 	if err != nil {
@@ -141,7 +162,20 @@ func run(ctx context.Context, cfg Config, timings timings) error {
 	defer src.Close()
 
 	state := newSchedule(cfg.QuietPeriod, timings.retry)
-	report("watching %s for changes matching %q", root, cfg.Trigger)
+	if cfg.ServiceLog != nil {
+		cfg.ServiceLog("watcher_started", "Watching the vault for submissions", map[string]string{"VAULT": root})
+		defer func() {
+			outcome := "success"
+			if errors.Is(runErr, context.Canceled) {
+				outcome = "canceled"
+			} else if runErr != nil {
+				outcome = "failed"
+			}
+			cfg.ServiceLog("watcher_stopped", "Vault watcher stopped", map[string]string{"OUTCOME": outcome})
+		}()
+	} else {
+		report("watching %s for changes matching %q", root, cfg.Trigger)
+	}
 	results := make(chan result, 1)
 	var active *runInfo
 	var stopping bool
@@ -185,7 +219,7 @@ func run(ctx context.Context, cfg Config, timings timings) error {
 			state.unready(path)
 			return
 		}
-		if state.ready(path, sha256.Sum256(content), now) {
+		if state.ready(path, sha256.Sum256(content), now) && cfg.ServiceLog == nil {
 			rel, _ := filepath.Rel(root, path)
 			report("run triggered by %s", filepath.ToSlash(rel))
 		}
@@ -203,7 +237,7 @@ func run(ctx context.Context, cfg Config, timings timings) error {
 		} else if stop != nil {
 			select {
 			case <-stop:
-				report("shutting down; waiting for the current run to finish")
+				shuttingDown()
 				stopWatching()
 			default:
 			}
@@ -261,11 +295,12 @@ func run(ctx context.Context, cfg Config, timings timings) error {
 					}
 					active = info
 					go func() {
+						started := time.Now()
 						written, err := cfg.Run(context.WithValue(ctx, runKey{}, info), prompt)
 						for _, path := range written {
 							info.recordWrite(path)
 						}
-						results <- result{err, work, info}
+						results <- result{err: err, batch: work, info: info, duration: time.Since(started)}
 					}()
 				}
 			}
@@ -284,7 +319,7 @@ func run(ctx context.Context, cfg Config, timings timings) error {
 		case <-done:
 			// Finalize cancellation at the top of the loop.
 		case <-stop:
-			report("shutting down; waiting for the current run to finish")
+			shuttingDown()
 			stopWatching()
 		case <-wake:
 		case event, ok := <-events:
@@ -295,22 +330,29 @@ func run(ctx context.Context, cfg Config, timings timings) error {
 				stopErr = errors.New("vault root was removed or moved")
 				stopWatching()
 			} else if err := src.event(event, queue); err != nil {
-				report("watcher error: %v", err)
+				watcherError("watcher error", err)
 			}
 		case err, ok := <-watchErrors:
 			if !ok {
 				watchErrors = nil
 				break
 			}
-			report("watcher error: %v", err)
+			watcherError("watcher error", err)
 			if errors.Is(err, fsnotify.ErrEventOverflow) {
 				if err := src.reconcile(ctx, queue); err != nil {
-					report("could not reconcile watcher: %v", err)
+					watcherError("could not reconcile watcher", err)
 				}
 			}
 		case res := <-results:
 			active = nil
 			checkStop()
+			// The run sends its result after closing its audit.
+			res.info.mu.Lock()
+			logPath := res.info.logPath
+			res.info.mu.Unlock()
+			if cfg.ServiceLog != nil {
+				reportRun(cfg.ServiceLog, res, logPath)
+			}
 			if !stopping {
 				now := time.Now()
 				res.info.mu.Lock()
@@ -320,10 +362,11 @@ func run(ctx context.Context, cfg Config, timings timings) error {
 					files.discard(path)
 					src.remember(path)
 				}
-				logPath := res.info.logPath
 				res.info.mu.Unlock()
 				if res.err != nil {
-					report("run failed: %v", res.err)
+					if cfg.ServiceLog == nil {
+						report("run failed: %v", res.err)
+					}
 					gaveUp, retry := state.failed(res.batch, now)
 					if len(gaveUp) != 0 {
 						for i, path := range gaveUp {
@@ -332,17 +375,51 @@ func run(ctx context.Context, cfg Config, timings timings) error {
 								gaveUp[i] = filepath.ToSlash(rel)
 							}
 						}
-						report("gave up on %s after one retry; edit the file again to re-trigger", strings.Join(gaveUp, ", "))
+						if cfg.ServiceLog != nil {
+							cfg.ServiceLog("retry_exhausted", "Run retry exhausted; edit the note again to resubmit", nil)
+						} else {
+							report("gave up on %s after one retry; edit the file again to re-trigger", strings.Join(gaveUp, ", "))
+						}
 						appendGiveUp(root, logPath, gaveUp)
 					}
 					if retry {
-						report("retrying in %.0fs", math.Round(timings.retry.Seconds()))
+						if cfg.ServiceLog != nil {
+							cfg.ServiceLog("retry_scheduled", "Run retry scheduled", map[string]string{
+								"RETRY_DELAY_MS": strconv.FormatInt(timings.retry.Milliseconds(), 10),
+							})
+						} else {
+							report("retrying in %.0fs", math.Round(timings.retry.Seconds()))
+						}
 					}
 				}
 			}
 		}
 		timer.Stop()
 	}
+}
+
+func reportRun(log ServiceLog, res result, auditPath string) {
+	trigger := "note_change"
+	if res.batch.initial {
+		trigger = "startup"
+	}
+	outcome, message := "success", "Run finished"
+	if errors.Is(res.err, context.Canceled) {
+		outcome, message = "canceled", "Run canceled"
+	} else if res.err != nil {
+		outcome, message = "failed", "Run failed"
+	}
+	fields := map[string]string{
+		"TRIGGER":     trigger,
+		"OUTCOME":     outcome,
+		"DURATION_MS": strconv.FormatInt(res.duration.Milliseconds(), 10),
+	}
+	if auditPath != "" {
+		fields["AUDIT_PATH"] = auditPath
+	} else if res.err != nil {
+		message += ": " + res.err.Error()
+	}
+	log("run_finished", message, fields)
 }
 
 // Limits the amount buffered for classification, independently of note-tool limits.
