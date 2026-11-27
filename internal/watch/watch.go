@@ -294,6 +294,13 @@ func run(ctx context.Context, cfg Config, timings timings) (runErr error) {
 						written: make(map[string]struct{}),
 					}
 					active = info
+					if cfg.ServiceLog != nil {
+						message := "Run started"
+						if !work.initial {
+							message = "Run started after note change"
+						}
+						cfg.ServiceLog("run_started", message, map[string]string{"TRIGGER": runTrigger(work.initial)})
+					}
 					go func() {
 						started := time.Now()
 						written, err := cfg.Run(context.WithValue(ctx, runKey{}, info), prompt)
@@ -398,11 +405,14 @@ func run(ctx context.Context, cfg Config, timings timings) (runErr error) {
 	}
 }
 
-func reportRun(log ServiceLog, res result, auditPath string) {
-	trigger := "note_change"
-	if res.batch.initial {
-		trigger = "startup"
+func runTrigger(initial bool) string {
+	if initial {
+		return "startup"
 	}
+	return "note_change"
+}
+
+func reportRun(log ServiceLog, res result, auditPath string) {
 	outcome, message := "success", "Run finished"
 	if errors.Is(res.err, context.Canceled) {
 		outcome, message = "canceled", "Run canceled"
@@ -410,7 +420,7 @@ func reportRun(log ServiceLog, res result, auditPath string) {
 		outcome, message = "failed", "Run failed"
 	}
 	fields := map[string]string{
-		"TRIGGER":     trigger,
+		"TRIGGER":     runTrigger(res.batch.initial),
 		"OUTCOME":     outcome,
 		"DURATION_MS": strconv.FormatInt(res.duration.Milliseconds(), 10),
 	}

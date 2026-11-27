@@ -131,10 +131,11 @@ Draft a request inside an Obsidian comment, then remove the `%%` lines to submit
 %%
 ```
 
-Use `#bobik` as a standalone, case-sensitive tag followed by a colon,
-whitespace, or end of file. Tags inside Markdown code don't count. A commented
-tag makes the whole note a draft, even if it also has a ready tag. Built-in file
-tools won't edit drafts; Bash is told to leave them alone but can't enforce that.
+Use `#bobik` as a standalone, case-sensitive tag. Punctuation works (`hey
+#bobik!`), but longer or nested tags like `#bobik-draft` and `#bobik/foo` don't
+count. Tags inside Markdown code don't count. A commented tag makes the whole
+note a draft, even if it also has a ready tag. Built-in file tools won't edit
+drafts; Bash is told to leave them alone but can't enforce that.
 
 Runs don't overlap. Bobik suppresses known file-tool writes, but Bash edits can
 trigger another run. Remove the tag when handling a submission to avoid
@@ -173,8 +174,9 @@ Use `systemctl --user stop bobik.service` to stop it for now, or
 systemd restarts a failed watcher with a five-second delay and caps repeated
 starts at five per minute. Every watcher start triggers a Bobik run.
 Agent replies and detailed run audits stay in `.agent-bobik/`. The service
-journal records lifecycle and run events, with fields for outcome, trigger,
-duration, and audit path when available. To see failed runs:
+journal records when runs start (`run_started`) and finish (`run_finished`),
+with fields for outcome, trigger, duration, and audit path when available.
+To see failed runs:
 
 ```sh
 journalctl --user -u bobik.service BOBIK_EVENT=run_finished BOBIK_OUTCOME=failed

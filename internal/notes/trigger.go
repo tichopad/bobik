@@ -57,16 +57,18 @@ func hasDefaultTag(part string) bool {
 		after := part[start:]
 		left, _ := utf8.DecodeLastRuneInString(part[:idx])
 		right, _ := utf8.DecodeRuneInString(after)
-		leftBoundary := !unicode.IsLetter(left) && !unicode.IsNumber(left) && !strings.ContainsRune("_/#-", left)
-		// Match JavaScript's \s (Unicode Zs, line terminators, ASCII space
-		// controls, and BOM; unlike unicode.IsSpace, not U+0085).
-		rightBoundary := after == "" || right == ':' || unicode.Is(unicode.Zs, right) ||
-			strings.ContainsRune("\t\n\v\f\r\u2028\u2029\ufeff", right)
-		if leftBoundary && rightBoundary {
+		// Keep JavaScript's whitespace rules, which exclude U+0085.
+		rightBoundary := after == "" || unicode.IsPunct(right) || unicode.IsSymbol(right) ||
+			unicode.Is(unicode.Zs, right) || strings.ContainsRune("\t\n\v\f\r\u2028\u2029\ufeff", right)
+		if !tagCharacter(left) && rightBoundary && !tagCharacter(right) {
 			return true
 		}
 	}
 	return false
+}
+
+func tagCharacter(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsNumber(r) || unicode.IsMark(r) || strings.ContainsRune("_/#-", r)
 }
 
 type sourceRange struct{ start, stop int }

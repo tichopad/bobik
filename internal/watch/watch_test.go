@@ -48,7 +48,10 @@ func TestServiceReportsRunFinishingDuringShutdown(t *testing.T) {
 		cfg.ServiceLog = func(name, _ string, fields map[string]string) {
 			events <- event{name, fields}
 		}
-	}, func(ctx context.Context, _ testRun) ([]string, error) {
+	}, func(ctx context.Context, run testRun) ([]string, error) {
+		if run.initial {
+			return nil, nil
+		}
 		select {
 		case <-finish:
 			RecordLogPath(ctx, "/vault/.agent-bobik/audit.jsonl")
@@ -71,12 +74,21 @@ func TestServiceReportsRunFinishingDuringShutdown(t *testing.T) {
 		}
 	}
 	next("watcher_started")
+	if fields := next("run_started"); fields["TRIGGER"] != "startup" {
+		t.Fatalf("startup fields: %v", fields)
+	}
+	h.nextRun(t)
+	next("run_finished")
+	write(t, filepath.Join(h.root, "request.md"), "hey #bobik!")
+	if fields := next("run_started"); fields["TRIGGER"] != "note_change" {
+		t.Fatalf("note-change fields: %v", fields)
+	}
 	h.nextRun(t)
 	close(h.graceful)
 	next("watcher_stopping")
 	close(finish)
 	fields := next("run_finished")
-	if fields["OUTCOME"] != "success" || fields["TRIGGER"] != "startup" ||
+	if fields["OUTCOME"] != "success" || fields["TRIGGER"] != "note_change" ||
 		fields["AUDIT_PATH"] != "/vault/.agent-bobik/audit.jsonl" || fields["DURATION_MS"] == "" {
 		t.Fatalf("run fields: %v", fields)
 	}
